@@ -14,9 +14,14 @@ mongoose.connect(process.env.MONGO_URI)
   .catch(err => console.error("MongoDB Error:", err));
 
 app.use('/auth', require('./routes/auth'));
-app.use('/cars', require('./routes/cars'));
+app.use('/jobs',      require('./routes/jobs'));        // NEW
+app.use('/customers', require('./routes/customers'));   // NEW
 app.use('/upload', require('./routes/upload'));
 app.use('/admin', require('./routes/admin'));  // ← NEW
+
+// Keep old /cars route alive temporarily during transition
+// Remove after confirming employee app is fully updated
+app.use('/cars', require('./routes/cars'));
 
  app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server running on port ${PORT}`);
