@@ -91,4 +91,45 @@ router.post('/', upload.single('image'), async (req, res) => {
   res.json({ url: s3Url });
 });
 
+// POST /upload/employee-doc?empId=xxx&docType=profile|aadhaar_front|aadhaar_back|pan_front|pan_back
+router.post('/employee-doc', upload.single('image'), async (req, res) => {
+  const file = req.file;
+  if (!file) return res.status(400).send("No file provided");
+
+  const { empId, docType } = req.query;
+  if (!empId || !docType) return res.status(400).send("empId and docType required");
+
+  const allowed = ['profile', 'aadhaar_front', 'aadhaar_back', 'pan_front', 'pan_back'];
+  if (!allowed.includes(docType)) return res.status(400).send("Invalid docType");
+
+  const s3Key = `employees/${empId}/${docType}.jpg`;
+  const params = {
+    Bucket:      process.env.S3_BUCKET,
+    Key:         s3Key,
+    Body:        file.buffer,
+    ContentType: file.mimetype,
+    ACL:         'public-read',
+  };
+
+  let s3Url;
+  try {
+    const data = await s3.upload(params).promise();
+    s3Url = data.Location;
+  } catch (err) {
+    console.error("S3 upload error:", err);
+    return res.status(500).send("Upload failed");
+  }
+
+  try {
+    const User = require('../models/user');
+    await User.findByIdAndUpdate(empId, {
+      [`photos.${docType}`]: s3Url,
+    });
+  } catch (err) {
+    console.error("DB save error:", err);
+  }
+
+  res.json({ url: s3Url });
+});
+
 module.exports = router;
