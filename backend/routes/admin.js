@@ -22,20 +22,59 @@ function adminAuth(req, res, next) {
   }
 }
 
-// Extract lat/lng from Google Maps link
-function extractLatLng(mapsLink) {
+// Resolve shortened Google Maps URL and extract lat/lng
+// Follow full redirect chain (up to maxHops), return final URL
+function resolveRedirects(url, maxHops = 5) {
+  return new Promise((resolve, reject) => {
+    let hops = 0;
+    function follow(currentUrl) {
+      if (hops++ >= maxHops) return resolve(currentUrl);
+      const lib = currentUrl.startsWith('https') ? require('https') : require('http');
+      const req = lib.get(currentUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
+        res.destroy();
+        const loc = res.headers['location'];
+        if (loc && [301,302,303,307,308].includes(res.statusCode)) {
+          const next = loc.startsWith('http') ? loc : new URL(loc, currentUrl).href;
+          follow(next);
+        } else {
+          resolve(currentUrl);
+        }
+      });
+      req.on('error', reject);
+      req.setTimeout(8000, () => { req.destroy(); resolve(currentUrl); });
+    }
+    follow(url);
+  });
+}
+
+async function extractLatLng(mapsLink) {
   if (!mapsLink) return null;
+  let url = mapsLink.trim();
+
+  // Resolve shortened URLs — maps.app.goo.gl redirects 2-3 times before
+  // reaching the full google.com/maps URL that contains coordinates
+  if (url.includes('goo.gl')) {
+    try {
+      url = await resolveRedirects(url);
+    } catch (e) {
+      console.error('[extractLatLng] Redirect error:', e.message);
+    }
+  }
+
+  // Try all known Google Maps URL coordinate patterns
   const patterns = [
-    /@(-?\d+\.\d+),(-?\d+\.\d+)/,
-    /[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)/,
-    /ll=(-?\d+\.\d+),(-?\d+\.\d+)/,
-    /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/,
-    /place\/(-?\d+\.\d+),(-?\d+\.\d+)/,
+    /@(-?\d+\.\d+),(-?\d+\.\d+)/,          // /@lat,lng,zoom
+    /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/,      // place data format
+    /[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)/,     // ?q=lat,lng
+    /ll=(-?\d+\.\d+),(-?\d+\.\d+)/,        // ll=lat,lng
+    /place\/(-?\d+\.\d+),(-?\d+\.\d+)/,    // /place/lat,lng
   ];
   for (const p of patterns) {
-    const m = mapsLink.match(p);
+    const m = url.match(p);
     if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
   }
+
+  console.log('[extractLatLng] Could not extract coords from:', url);
   return null;
 }
 
@@ -139,7 +178,7 @@ router.put('/employees/:id', adminAuth, async (req, res) => {
     const { homeMapsLink, ...rest } = req.body;
     const updates = { ...rest };
     if (homeMapsLink !== undefined) {
-      const coords = extractLatLng(homeMapsLink);
+      const coords = await extractLatLng(homeMapsLink);
       updates.homeMapsLink  = homeMapsLink || null;
       updates.homeLocation  = coords || { lat: null, lng: null };
     }
@@ -164,7 +203,7 @@ router.post('/customers', adminAuth, async (req, res) => {
     const { customerName, address, vehicleNumber, vehicleColor,
             carModel, carType, phone, mapsLink } = req.body;
     if (!customerName) return res.status(400).send("customerName required");
-    const location = extractLatLng(mapsLink);
+    const location = await extractLatLng(mapsLink);
     const customer = await Customer.create({
       customerName, address, vehicleNumber, vehicleColor,
       carModel, carType, phone,
@@ -204,7 +243,7 @@ router.put('/customers/:id', adminAuth, async (req, res) => {
     const { mapsLink } = req.body;
     const updates = { ...req.body };
     if (mapsLink !== undefined) {
-      updates.location = extractLatLng(mapsLink) || { lat: null, lng: null };
+      updates.location = await extractLatLng(mapsLink) || { lat: null, lng: null };
     }
     const customer = await Customer.findByIdAndUpdate(
       req.params.id, updates, { new: true });
@@ -347,7 +386,7 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
           if (customer?.location?.lat) {
             coords = { lat: customer.location.lat, lng: customer.location.lng };
           } else if (customer?.mapsLink) {
-            coords = extractLatLng(customer.mapsLink);
+            coords = await extractLatLng(customer.mapsLink);
           }
           if (coords) waypoints.push(coords);
         }
