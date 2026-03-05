@@ -37,6 +37,7 @@ const jobSchema = new mongoose.Schema({
   },
 
   completedAt: { type: Date, default: null },
+  beforeUploadedAt:  { type: Date, default: null }, // when before photo was taken
 
 }, { timestamps: true });
 

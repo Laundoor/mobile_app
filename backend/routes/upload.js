@@ -67,6 +67,7 @@ router.post('/', upload.single('image'), async (req, res) => {
 
     } else if (photoType === 'before') {
       job.images.before = s3Url;
+      job.beforeUploadedAt = new Date(); // exact timestamp for share message
       // Mark employee active for today
       if (employeeId) {
         const today = new Date().toISOString().split('T')[0];
