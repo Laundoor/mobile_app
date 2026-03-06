@@ -30,18 +30,44 @@ function resolveRedirects(url, maxHops = 5) {
     function follow(currentUrl) {
       if (hops++ >= maxHops) return resolve(currentUrl);
       const lib = currentUrl.startsWith('https') ? require('https') : require('http');
-      const req = lib.get(currentUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } }, (res) => {
-        res.destroy();
+      const req = lib.get(currentUrl, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/91.0 Mobile Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml',
+        }
+      }, (res) => {
         const loc = res.headers['location'];
+        // Standard redirect
         if (loc && [301,302,303,307,308].includes(res.statusCode)) {
+          res.destroy();
           const next = loc.startsWith('http') ? loc : new URL(loc, currentUrl).href;
           follow(next);
-        } else {
-          resolve(currentUrl);
+          return;
         }
+        // Google now returns 200 with HTML for maps.app.goo.gl
+        // Read body to extract the real URL from meta refresh or canonical
+        let body = '';
+        res.on('data', chunk => { body += chunk; if (body.length > 50000) res.destroy(); });
+        res.on('end', () => {
+          // Try meta refresh redirect: <meta http-equiv="refresh" content="0;url=...">
+          const metaMatch = body.match(/content=["']0;url=([^"']+)/i);
+          if (metaMatch) { follow(metaMatch[1]); return; }
+
+          // Try window.location redirect in script
+          const scriptMatch = body.match(/window\.location\.(?:href|replace)\s*=\s*["']([^"']+maps\.google[^"']+)["']/i);
+          if (scriptMatch) { follow(scriptMatch[1]); return; }
+
+          // Try canonical link with coords already in it
+          const canonMatch = body.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i);
+          if (canonMatch && canonMatch[1].includes('google')) { follow(canonMatch[1]); return; }
+
+          // Try to extract coords directly from the HTML body
+          resolve(currentUrl + '|||BODY:' + body.substring(0, 5000));
+        });
+        res.on('error', () => resolve(currentUrl));
       });
       req.on('error', reject);
-      req.setTimeout(8000, () => { req.destroy(); resolve(currentUrl); });
+      req.setTimeout(10000, () => { req.destroy(); resolve(currentUrl); });
     }
     follow(url);
   });
@@ -50,12 +76,20 @@ function resolveRedirects(url, maxHops = 5) {
 async function extractLatLng(mapsLink) {
   if (!mapsLink) return null;
   let url = mapsLink.trim();
+  let extraBody = '';
 
-  // Resolve shortened URLs — maps.app.goo.gl redirects 2-3 times before
-  // reaching the full google.com/maps URL that contains coordinates
-  if (url.includes('goo.gl')) {
+  // Resolve shortened URLs
+  if (url.includes('goo.gl') || url.includes('maps.app')) {
     try {
-      url = await resolveRedirects(url);
+      const resolved = await resolveRedirects(url);
+      // Check if body was appended for direct extraction
+      if (resolved.includes('|||BODY:')) {
+        const parts = resolved.split('|||BODY:');
+        url       = parts[0];
+        extraBody = parts[1] || '';
+      } else {
+        url = resolved;
+      }
     } catch (e) {
       console.error('[extractLatLng] Redirect error:', e.message);
     }
@@ -63,20 +97,46 @@ async function extractLatLng(mapsLink) {
 
   // Try all known Google Maps URL coordinate patterns
   const patterns = [
-    /@(-?\d+\.\d+),(-?\d+\.\d+)/,          // /@lat,lng,zoom
-    /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/,      // place data format
-    /[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)/,     // ?q=lat,lng
-    /ll=(-?\d+\.\d+),(-?\d+\.\d+)/,        // ll=lat,lng
-    /place\/(-?\d+\.\d+),(-?\d+\.\d+)/,    // /place/lat,lng
+    /@(-?\d+\.\d+),(-?\d+\.\d+)/,
+    /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/,
+    /[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)/,
+    /ll=(-?\d+\.\d+),(-?\d+\.\d+)/,
+    /place\/(-?\d+\.\d+),(-?\d+\.\d+)/,
+    /center=(-?\d+\.\d+),(-?\d+\.\d+)/,
   ];
+
+  // Check resolved URL first
   for (const p of patterns) {
     const m = url.match(p);
     if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
   }
 
+  // Fall back to scanning HTML body if we got one
+  if (extraBody) {
+    // Common patterns in Google Maps HTML
+    const bodyPatterns = [
+      /@(-?\d+\.\d+),(-?\d+\.\d+)/,
+      /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/,
+      /"(-?\d{1,3}\.\d{4,}),(-?\d{1,3}\.\d{4,})"/,  // quoted lat,lng pairs
+      /center=(-?\d+\.\d+)%2C(-?\d+\.\d+)/,           // URL-encoded comma
+    ];
+    for (const p of bodyPatterns) {
+      const m = extraBody.match(p);
+      if (m) {
+        const lat = parseFloat(m[1]);
+        const lng = parseFloat(m[2]);
+        // Sanity check — India coords
+        if (lat > 5 && lat < 40 && lng > 65 && lng < 100) {
+          return { lat, lng };
+        }
+      }
+    }
+  }
+
   console.log('[extractLatLng] Could not extract coords from:', url);
   return null;
 }
+
 
 // Haversine distance in KM
 function haversineKm(lat1, lng1, lat2, lng2) {
