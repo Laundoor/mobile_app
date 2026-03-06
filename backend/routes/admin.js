@@ -24,51 +24,53 @@ function adminAuth(req, res, next) {
 
 // Resolve shortened Google Maps URL and extract lat/lng
 // Follow full redirect chain (up to maxHops), return final URL
+// Follows redirects using HEAD requests only — never reads body, 3s hard timeout per hop
 function resolveRedirects(url, maxHops = 5) {
-  return new Promise((resolve, reject) => {
+  return new Promise((resolve) => {
     let hops = 0;
+
     function follow(currentUrl) {
       if (hops++ >= maxHops) return resolve(currentUrl);
-      const lib = currentUrl.startsWith('https') ? require('https') : require('http');
-      const req = lib.get(currentUrl, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/91.0 Mobile Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml',
-        }
-      }, (res) => {
-        const loc = res.headers['location'];
-        // Standard redirect
-        if (loc && [301,302,303,307,308].includes(res.statusCode)) {
-          res.destroy();
-          const next = loc.startsWith('http') ? loc : new URL(loc, currentUrl).href;
-          follow(next);
-          return;
-        }
-        // Google now returns 200 with HTML for maps.app.goo.gl
-        // Read body to extract the real URL from meta refresh or canonical
-        let body = '';
-        res.on('data', chunk => { body += chunk; if (body.length > 50000) res.destroy(); });
-        res.on('end', () => {
-          // Try meta refresh redirect: <meta http-equiv="refresh" content="0;url=...">
-          const metaMatch = body.match(/content=["']0;url=([^"']+)/i);
-          if (metaMatch) { follow(metaMatch[1]); return; }
 
-          // Try window.location redirect in script
-          const scriptMatch = body.match(/window\.location\.(?:href|replace)\s*=\s*["']([^"']+maps\.google[^"']+)["']/i);
-          if (scriptMatch) { follow(scriptMatch[1]); return; }
+      let settled = false;
+      const done  = (val) => { if (!settled) { settled = true; resolve(val); } };
 
-          // Try canonical link with coords already in it
-          const canonMatch = body.match(/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i);
-          if (canonMatch && canonMatch[1].includes('google')) { follow(canonMatch[1]); return; }
+      try {
+        const parsed = new URL(currentUrl);
+        const lib    = parsed.protocol === 'https:' ? require('https') : require('http');
 
-          // Try to extract coords directly from the HTML body
-          resolve(currentUrl + '|||BODY:' + body.substring(0, 5000));
-        });
-        res.on('error', () => resolve(currentUrl));
-      });
-      req.on('error', reject);
-      req.setTimeout(10000, () => { req.destroy(); resolve(currentUrl); });
+        const req = lib.request(
+          {
+            hostname: parsed.hostname,
+            path:     parsed.pathname + parsed.search,
+            method:   'HEAD',
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
+              'Accept':     'text/html',
+            },
+          },
+          (res) => {
+            res.destroy(); // never read body
+            const loc = res.headers['location'];
+            if (loc && [301, 302, 303, 307, 308].includes(res.statusCode)) {
+              const next = loc.startsWith('http') ? loc
+                : new URL(loc, currentUrl).href;
+              follow(next);
+            } else {
+              done(currentUrl);
+            }
+          }
+        );
+
+        // Hard 3-second timeout — never hang
+        req.setTimeout(3000, () => { req.destroy(); done(currentUrl); });
+        req.on('error', ()  => done(currentUrl));
+        req.end();
+      } catch (e) {
+        done(currentUrl);
+      }
     }
+
     follow(url);
   });
 }
@@ -76,20 +78,15 @@ function resolveRedirects(url, maxHops = 5) {
 async function extractLatLng(mapsLink) {
   if (!mapsLink) return null;
   let url = mapsLink.trim();
-  let extraBody = '';
 
-  // Resolve shortened URLs
+  // Resolve shortened URLs with 5s total budget
   if (url.includes('goo.gl') || url.includes('maps.app')) {
     try {
-      const resolved = await resolveRedirects(url);
-      // Check if body was appended for direct extraction
-      if (resolved.includes('|||BODY:')) {
-        const parts = resolved.split('|||BODY:');
-        url       = parts[0];
-        extraBody = parts[1] || '';
-      } else {
-        url = resolved;
-      }
+      const resolved = await Promise.race([
+        resolveRedirects(url),
+        new Promise(r => setTimeout(() => r(url), 5000)), // 5s hard cap
+      ]);
+      url = resolved;
     } catch (e) {
       console.error('[extractLatLng] Redirect error:', e.message);
     }
@@ -105,32 +102,9 @@ async function extractLatLng(mapsLink) {
     /center=(-?\d+\.\d+),(-?\d+\.\d+)/,
   ];
 
-  // Check resolved URL first
   for (const p of patterns) {
     const m = url.match(p);
     if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
-  }
-
-  // Fall back to scanning HTML body if we got one
-  if (extraBody) {
-    // Common patterns in Google Maps HTML
-    const bodyPatterns = [
-      /@(-?\d+\.\d+),(-?\d+\.\d+)/,
-      /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/,
-      /"(-?\d{1,3}\.\d{4,}),(-?\d{1,3}\.\d{4,})"/,  // quoted lat,lng pairs
-      /center=(-?\d+\.\d+)%2C(-?\d+\.\d+)/,           // URL-encoded comma
-    ];
-    for (const p of bodyPatterns) {
-      const m = extraBody.match(p);
-      if (m) {
-        const lat = parseFloat(m[1]);
-        const lng = parseFloat(m[2]);
-        // Sanity check — India coords
-        if (lat > 5 && lat < 40 && lng > 65 && lng < 100) {
-          return { lat, lng };
-        }
-      }
-    }
   }
 
   console.log('[extractLatLng] Could not extract coords from:', url);
