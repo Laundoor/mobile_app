@@ -80,6 +80,9 @@ router.post('/', upload.single('image'), async (req, res) => {
     } else if (photoType === 'after') {
       const afterLabel = label || `Photo ${job.images.after.length + 1}`;
       job.images.after.push({ label: afterLabel, url: s3Url });
+
+    } else if (photoType === 'towel_soak') {
+      job.images.towelSoak = s3Url;
     }
 
     await job.save();

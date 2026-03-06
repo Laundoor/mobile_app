@@ -27,16 +27,14 @@ const jobSchema = new mongoose.Schema({
   },
 
   images: {
-    selfie: { type: String, default: null },
-    towels: [{ type: String }],              // up to 6 S3 URLs
-    before: { type: String, default: null },
-    after:  [{
-      label: { type: String },
-      url:   { type: String }
-    }]
+    selfie:    { type: String, default: null },
+    towels:    [{ type: String }],
+    before:    { type: String, default: null },
+    after:     [{ label: { type: String }, url: { type: String } }],
+    towelSoak: { type: String, default: null },
   },
 
-  completedAt: { type: Date, default: null },
+  completedAt:       { type: Date, default: null },
   beforeUploadedAt:  { type: Date, default: null }, // when before photo was taken
 
 }, { timestamps: true });
