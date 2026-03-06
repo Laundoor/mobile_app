@@ -215,7 +215,11 @@ router.post('/customers', adminAuth, async (req, res) => {
 
 router.get('/customers', adminAuth, async (req, res) => {
   try {
-    const customers = await Customer.find().sort({ createdAt: -1 });
+    const { search } = req.query;
+    const filter = search
+      ? { customerName: { $regex: search, $options: 'i' } }
+      : {};
+    const customers = await Customer.find(filter).sort({ createdAt: -1 });
     res.json(customers);
   } catch (err) { res.status(500).send("Server error"); }
 });
@@ -270,11 +274,57 @@ router.post('/assign', adminAuth, async (req, res) => {
       customerId, assignedDate: today, status: { $nin: ['Cancelled'] },
     });
     if (existing) return res.status(400).send("Customer already assigned today");
-    const job      = await Job.create({ customerId, employeeId, serviceType, assignedDate: today, status: 'Pending' });
+
+    // sortOrder = next in line for this employee on this date
+    const lastJob = await Job.findOne({ employeeId, assignedDate: today })
+      .sort({ sortOrder: -1 });
+    const sortOrder = lastJob ? lastJob.sortOrder + 1 : 1;
+
+    const job      = await Job.create({ customerId, employeeId, serviceType, assignedDate: today, status: 'Pending', sortOrder });
     const populated= await Job.findById(job._id).populate('customerId');
     res.json(populated);
   } catch (err) { res.status(500).send("Server error"); }
 });
+
+// GET /admin/planner/:employeeId?date=YYYY-MM-DD — jobs for employee on date
+router.get('/planner/:employeeId', adminAuth, async (req, res) => {
+  try {
+    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const jobs = await Job.find({
+      employeeId:   req.params.employeeId,
+      assignedDate: date,
+    }).populate('customerId').sort({ sortOrder: 1 });
+    res.json(jobs);
+  } catch (err) { res.status(500).send("Server error"); }
+});
+
+// PUT /admin/planner/reorder — reorder jobs for employee on date
+// Body: { employeeId, date, jobIds: ['id1','id2',...] } — ordered array
+router.put('/planner/reorder', adminAuth, async (req, res) => {
+  try {
+    const { jobIds } = req.body;
+    if (!Array.isArray(jobIds)) return res.status(400).send("jobIds array required");
+    await Promise.all(
+      jobIds.map((id, index) =>
+        Job.findByIdAndUpdate(id, { sortOrder: index + 1 })
+      )
+    );
+    res.json({ success: true });
+  } catch (err) { res.status(500).send("Server error"); }
+});
+
+// DELETE /admin/planner/:jobId — remove a planned job (only if Pending)
+router.delete('/planner/:jobId', adminAuth, async (req, res) => {
+  try {
+    const job = await Job.findById(req.params.jobId);
+    if (!job) return res.status(404).send("Job not found");
+    if (job.status !== 'Pending') return res.status(400).send("Can only remove pending jobs");
+    await Job.findByIdAndDelete(req.params.jobId);
+    res.json({ success: true });
+  } catch (err) { res.status(500).send("Server error"); }
+});
+
+
 
 router.put('/reassign', adminAuth, async (req, res) => {
   try {

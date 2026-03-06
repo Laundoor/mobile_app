@@ -11,7 +11,7 @@ router.get('/employee/:employeeId', async (req, res) => {
     const jobs  = await Job.find({
       employeeId:   req.params.employeeId,
       assignedDate: today,
-    }).populate('customerId'); // attach full customer details
+    }).populate('customerId').sort({ sortOrder: 1 }); // employee sees jobs in planner order
 
     res.json(jobs);
   } catch (err) {

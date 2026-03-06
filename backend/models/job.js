@@ -19,6 +19,7 @@ const jobSchema = new mongoose.Schema({
   serviceCount: { type: Number, default: 0 }, // snapshot at time of completion
 
   assignedDate: { type: String, default: null }, // "YYYY-MM-DD"
+  sortOrder:    { type: Number, default: 0 },     // employee sees jobs in this order
 
   status: {
     type: String,
