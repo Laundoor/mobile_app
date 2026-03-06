@@ -22,94 +22,59 @@ function adminAuth(req, res, next) {
   }
 }
 
-// Resolve shortened Google Maps URL and extract lat/lng
-// Follow full redirect chain (up to maxHops), return final URL
-// Follows redirects using HEAD requests only — never reads body, 3s hard timeout per hop
-function resolveRedirects(url, maxHops = 5) {
-  return new Promise((resolve) => {
-    let hops = 0;
+const axios = require('axios');
 
-    function follow(currentUrl) {
-      if (hops++ >= maxHops) return resolve(currentUrl);
+// Extract lat/lng from any Google Maps URL (short or full)
+// Ported from old app — proven working
+async function extractLatLng(url) {
+  try {
+    if (!url) return null;
 
-      let settled = false;
-      const done  = (val) => { if (!settled) { settled = true; resolve(val); } };
+    // Step 0: Direct ?q=lat,lng pattern
+    const directMatch = url.match(/q=(-?\d+\.\d+),(-?\d+\.\d+)/);
+    if (directMatch) {
+      return { lat: parseFloat(directMatch[1]), lng: parseFloat(directMatch[2]) };
+    }
 
+    // Step 1: Expand shortened URLs (maps.app.goo.gl / goo.gl/maps)
+    if (/maps\.app\.goo\.gl|goo\.gl\/maps/.test(url)) {
       try {
-        const parsed = new URL(currentUrl);
-        const lib    = parsed.protocol === 'https:' ? require('https') : require('http');
-
-        const req = lib.request(
-          {
-            hostname: parsed.hostname,
-            path:     parsed.pathname + parsed.search,
-            method:   'HEAD',
-            headers: {
-              'User-Agent': 'Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36',
-              'Accept':     'text/html',
-            },
-          },
-          (res) => {
-            res.destroy(); // never read body
-            const loc = res.headers['location'];
-            if (loc && [301, 302, 303, 307, 308].includes(res.statusCode)) {
-              const next = loc.startsWith('http') ? loc
-                : new URL(loc, currentUrl).href;
-              follow(next);
-            } else {
-              done(currentUrl);
-            }
-          }
-        );
-
-        // Hard 3-second timeout — never hang
-        req.setTimeout(3000, () => { req.destroy(); done(currentUrl); });
-        req.on('error', ()  => done(currentUrl));
-        req.end();
+        const response = await axios.get(url, {
+          maxRedirects: 0,
+          validateStatus: s => s === 301 || s === 302,
+        });
+        url = response.headers.location || url;
       } catch (e) {
-        done(currentUrl);
+        console.warn('[extractLatLng] Could not expand short URL:', e.message);
       }
     }
 
-    follow(url);
-  });
-}
-
-async function extractLatLng(mapsLink) {
-  if (!mapsLink) return null;
-  let url = mapsLink.trim();
-
-  // Resolve shortened URLs with 5s total budget
-  if (url.includes('goo.gl') || url.includes('maps.app')) {
-    try {
-      const resolved = await Promise.race([
-        resolveRedirects(url),
-        new Promise(r => setTimeout(() => r(url), 5000)), // 5s hard cap
-      ]);
-      url = resolved;
-    } catch (e) {
-      console.error('[extractLatLng] Redirect error:', e.message);
+    // Step 2: Multiple coordinate patterns on expanded URL
+    const patterns = [
+      /@(-?\d+\.\d+),(-?\d+\.\d+)/,
+      /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/,
+      /center=(-?\d+\.\d+),(-?\d+\.\d+)/,
+      /destination=(-?\d+\.\d+),(-?\d+\.\d+)/,
+      /%2C(-?\d+\.\d+)%2C(-?\d+\.\d+)/,
+      /[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)/,
+      /ll=(-?\d+\.\d+),(-?\d+\.\d+)/,
+      /place\/(-?\d+\.\d+),(-?\d+\.\d+)/,
+    ];
+    for (const regex of patterns) {
+      const match = url.match(regex);
+      if (match) {
+        return { lat: parseFloat(match[1]), lng: parseFloat(match[2]) };
+      }
     }
+
+    console.log('[extractLatLng] Could not extract coords from:', url);
+    return null;
+  } catch (err) {
+    console.error('[extractLatLng] Error:', err.message);
+    return null;
   }
-
-  // Try all known Google Maps URL coordinate patterns
-  const patterns = [
-    /@(-?\d+\.\d+),(-?\d+\.\d+)/,
-    /!3d(-?\d+\.\d+)!4d(-?\d+\.\d+)/,
-    /[?&]q=(-?\d+\.\d+),(-?\d+\.\d+)/,
-    /ll=(-?\d+\.\d+),(-?\d+\.\d+)/,
-    /place\/(-?\d+\.\d+),(-?\d+\.\d+)/,
-    /center=(-?\d+\.\d+),(-?\d+\.\d+)/,
-  ];
-
-  for (const p of patterns) {
-    const m = url.match(p);
-    if (m) return { lat: parseFloat(m[1]), lng: parseFloat(m[2]) };
-  }
-
-  console.log('[extractLatLng] Could not extract coords from:', url);
-  return null;
 }
+
 
 
 // Haversine distance in KM
