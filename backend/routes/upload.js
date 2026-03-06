@@ -83,6 +83,9 @@ router.post('/', upload.single('image'), async (req, res) => {
 
     } else if (photoType === 'towel_soak') {
       job.images.towelSoak = s3Url;
+
+    } else if (photoType === 'cancel') {
+      job.cancelPhotoUrl = s3Url;
     }
 
     await job.save();

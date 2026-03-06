@@ -35,7 +35,9 @@ const jobSchema = new mongoose.Schema({
   },
 
   completedAt:       { type: Date, default: null },
-  beforeUploadedAt:  { type: Date, default: null }, // when before photo was taken
+  beforeUploadedAt:  { type: Date, default: null },
+  cancelledAt:       { type: Date, default: null },
+  cancelPhotoUrl:    { type: String, default: null }, // photo taken at cancellation time
 
 }, { timestamps: true });
 

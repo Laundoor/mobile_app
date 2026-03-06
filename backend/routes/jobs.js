@@ -104,7 +104,105 @@ router.put('/:id/status', async (req, res) => {
   }
 });
 
-// ── PUT /jobs/:id/reassign — reassign job to different employee ───────────────
+// ── PUT /jobs/:id/cancel — cancel job with photo URL ─────────────────────────
+// Body: { cancelPhotoUrl }
+router.put('/:id/cancel', async (req, res) => {
+  try {
+    const { cancelPhotoUrl } = req.body;
+    const job = await Job.findById(req.params.id);
+    if (!job) return res.status(404).send("Job not found");
+
+    job.status         = 'Cancelled';
+    job.cancelledAt    = new Date();
+    job.cancelPhotoUrl = cancelPhotoUrl || null;
+    await job.save();
+    res.json(job);
+  } catch (err) {
+    res.status(500).send("Server error");
+  }
+});
+
+// ── GET /jobs/day-summary/:employeeId — summary for today ─────────────────────
+router.get('/day-summary/:employeeId', async (req, res) => {
+  try {
+    const today = new Date().toISOString().split('T')[0];
+    const jobs  = await Job.find({
+      employeeId:   req.params.employeeId,
+      assignedDate: today,
+    }).populate('customerId');
+
+    const total     = jobs.length;
+    const completed = jobs.filter(j => j.status === 'Completed').length;
+    const cancelled = jobs.filter(j => j.status === 'Cancelled').length;
+
+    // Distance: sum haversine for each completed/cancelled job from employee home
+    const User = require('../models/user');
+    const emp  = await User.findById(req.params.employeeId);
+
+    let distanceKm = 0;
+    if (emp?.homeLocation?.lat) {
+      const haversine = (lat1, lng1, lat2, lng2) => {
+        const R    = 6371;
+        const dLat = (lat2 - lat1) * Math.PI / 180;
+        const dLng = (lng2 - lng1) * Math.PI / 180;
+        const a    = Math.sin(dLat/2)**2 +
+                     Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) *
+                     Math.sin(dLng/2)**2;
+        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      };
+
+      const doneJobs = jobs.filter(j =>
+        (j.status === 'Completed' || j.status === 'Cancelled') &&
+        j.customerId?.location?.lat
+      );
+
+      if (doneJobs.length > 0) {
+        let prev = emp.homeLocation;
+        for (const j of doneJobs) {
+          const loc = j.customerId.location;
+          distanceKm += haversine(prev.lat, prev.lng, loc.lat, loc.lng);
+          prev = loc;
+        }
+        // Return home
+        distanceKm += haversine(
+          prev.lat, prev.lng,
+          emp.homeLocation.lat, emp.homeLocation.lng
+        );
+      }
+    }
+
+    // Hours worked: first job's beforeUploadedAt or cancelledAt → last job's completedAt or cancelledAt
+    const startTimes = jobs
+      .map(j => j.beforeUploadedAt || j.cancelledAt)
+      .filter(Boolean)
+      .map(d => new Date(d).getTime());
+
+    const endTimes = jobs
+      .map(j => j.completedAt || j.cancelledAt)
+      .filter(Boolean)
+      .map(d => new Date(d).getTime());
+
+    let hoursWorked = 0;
+    if (startTimes.length > 0 && endTimes.length > 0) {
+      const firstTime = Math.min(...startTimes);
+      const lastTime  = Math.max(...endTimes);
+      hoursWorked = (lastTime - firstTime) / (1000 * 60 * 60);
+    }
+
+    res.json({
+      total,
+      completed,
+      cancelled,
+      distanceKm:  Math.round(distanceKm * 10) / 10,
+      hoursWorked: Math.round(hoursWorked * 10) / 10,
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("Server error");
+  }
+});
+
+
 router.put('/:id/reassign', async (req, res) => {
   try {
     const { newEmployeeId } = req.body;
