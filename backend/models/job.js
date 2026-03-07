@@ -28,8 +28,6 @@ const jobSchema = new mongoose.Schema({
   },
 
   images: {
-    selfie:    { type: String, default: null },
-    towels:    [{ type: String }],
     before:    { type: String, default: null },
     after:     [{ label: { type: String }, url: { type: String } }],
     towelSoak: { type: String, default: null },
@@ -38,7 +36,16 @@ const jobSchema = new mongoose.Schema({
   completedAt:       { type: Date, default: null },
   beforeUploadedAt:  { type: Date, default: null },
   cancelledAt:       { type: Date, default: null },
-  cancelPhotoUrl:    { type: String, default: null }, // photo taken at cancellation time
+  cancelPhotoUrl:    { type: String, default: null },
+
+  complaint: {
+    raised:     { type: Boolean, default: false },
+    reason:     { type: String, default: null },
+    note:       { type: String, default: null },
+    raisedAt:   { type: Date,   default: null },
+    resolved:   { type: Boolean, default: false },
+    resolvedAt: { type: Date,   default: null },
+  }, // photo taken at cancellation time
 
 }, { timestamps: true });
 

@@ -1,4 +1,6 @@
-const express  = require('express');
+const express    = require('express');
+const Attendance = require('../models/attendance');
+
 const router   = express.Router();
 const User     = require('../models/user');
 const Customer = require('../models/customer');
@@ -382,7 +384,11 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
       completedAt: { $gte: from, $lt: to },
     }).populate('customerId', 'customerName carType carModel vehicleNumber mapsLink location');
 
-    // Group by date
+    // Helper: is this job payable (no unresolved complaint)
+    const isPayable = (job) =>
+      !job.complaint?.raised || job.complaint?.resolved === true;
+
+    // Group by date — only payable jobs count for distance
     const byDate = {};
     for (const job of jobs) {
       const dk = job.completedAt.toISOString().split('T')[0];
@@ -400,19 +406,22 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
 
     for (const [date, dayJobs] of Object.entries(byDate).sort()) {
       for (const job of dayJobs) {
-        const customer = job.customerId;
-        const carType  = customer?.carType || 'Hatchback';
-        const svcType  = job.serviceType   || '';
-        let earnings   = 0;
-        if (svcType === 'Exterior') {
-          earnings = pricing.exterior?.[carType] ?? 20;
-        } else if (svcType === 'Interior Standard') {
-          earnings = pricing.interiorStandard ?? 40;
-        } else if (svcType === 'Interior Premium') {
-          earnings = pricing.interiorPremium ?? 60;
+        const customer  = job.customerId;
+        const carType   = customer?.carType || 'Hatchback';
+        const svcType   = job.serviceType   || '';
+        const payable   = isPayable(job);
+        let earnings    = 0;
+        if (payable) {
+          if (svcType === 'Exterior') {
+            earnings = pricing.exterior?.[carType] ?? 20;
+          } else if (svcType === 'Interior Standard') {
+            earnings = pricing.interiorStandard ?? 40;
+          } else if (svcType === 'Interior Premium') {
+            earnings = pricing.interiorPremium ?? 60;
+          }
+          if (carTypeCounts[carType] !== undefined) carTypeCounts[carType]++;
+          totalJobEarnings += earnings;
         }
-        if (carTypeCounts[carType] !== undefined) carTypeCounts[carType]++;
-        totalJobEarnings += earnings;
         jobDetails.push({
           jobId:        job._id,
           date,
@@ -423,13 +432,21 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
           serviceType:  job.serviceType,
           serviceCount: job.serviceCount,
           earnings,
+          complaint: job.complaint?.raised ? {
+            raised:    job.complaint.raised,
+            resolved:  job.complaint.resolved,
+            reason:    job.complaint.reason,
+            note:      job.complaint.note,
+            raisedAt:  job.complaint.raisedAt,
+          } : null,
         });
       }
 
-      // Daily distance calculation
+      // Daily distance — skip stops with unresolved complaints
       if (home) {
-        const waypoints = [];
-        for (const job of dayJobs) {
+        const payableJobs = dayJobs.filter(isPayable);
+        const waypoints   = [];
+        for (const job of payableJobs) {
           const customer = job.customerId;
           let coords = null;
           if (customer?.location?.lat) {
@@ -453,12 +470,17 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
       }
     }
 
+    const complainedJobs  = jobs.filter(j => j.complaint?.raised && !j.complaint?.resolved);
+    const resolvedJobs    = jobs.filter(j => j.complaint?.raised &&  j.complaint?.resolved);
+
     res.json({
       employee: { id: employee._id, name: employee.name, email: employee.email,
                   hasHomeLocation: !!home },
       month, year, pricing,
       summary: {
         totalJobs:            jobs.length,
+        complainedJobs:       complainedJobs.length,
+        resolvedComplaints:   resolvedJobs.length,
         carTypeCounts,
         totalJobEarnings:     parseFloat(totalJobEarnings.toFixed(2)),
         totalDistanceKm:      parseFloat(totalDistanceKm.toFixed(2)),
@@ -474,8 +496,99 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// SEED
+// COMPLAINTS
 // ═══════════════════════════════════════════════════════════════════════════
+
+// POST /admin/complaints/:jobId — raise complaint
+router.post('/complaints/:jobId', adminAuth, async (req, res) => {
+  try {
+    const { reason, note } = req.body;
+    if (!reason) return res.status(400).send("reason required");
+
+    const job = await Job.findById(req.params.jobId);
+    if (!job) return res.status(404).send("Job not found");
+    if (job.status !== 'Completed') return res.status(400).send("Can only complain on completed jobs");
+    if (job.complaint?.raised && !job.complaint?.resolved)
+      return res.status(400).send("Complaint already raised");
+
+    // Decrement serviceCount on customer
+    await Customer.findByIdAndUpdate(job.customerId,
+      { $inc: { serviceCount: -1 } });
+
+    const updated = await Job.findByIdAndUpdate(
+      req.params.jobId,
+      {
+        'complaint.raised':   true,
+        'complaint.reason':   reason,
+        'complaint.note':     note || null,
+        'complaint.raisedAt': new Date(),
+        'complaint.resolved': false,
+        'complaint.resolvedAt': null,
+      },
+      { new: true }
+    ).populate('customerId');
+
+    res.json(updated);
+  } catch (err) { res.status(500).send("Server error"); }
+});
+
+// PUT /admin/complaints/:jobId/resolve — resolve complaint
+router.put('/complaints/:jobId/resolve', adminAuth, async (req, res) => {
+  try {
+    const job = await Job.findById(req.params.jobId);
+    if (!job) return res.status(404).send("Job not found");
+    if (!job.complaint?.raised) return res.status(400).send("No complaint raised");
+    if (job.complaint?.resolved) return res.status(400).send("Already resolved");
+
+    // Restore serviceCount on customer
+    await Customer.findByIdAndUpdate(job.customerId,
+      { $inc: { serviceCount: 1 } });
+
+    const updated = await Job.findByIdAndUpdate(
+      req.params.jobId,
+      {
+        'complaint.resolved':   true,
+        'complaint.resolvedAt': new Date(),
+      },
+      { new: true }
+    ).populate('customerId');
+
+    res.json(updated);
+  } catch (err) { res.status(500).send("Server error"); }
+});
+
+// GET /admin/employees/:id/complaints — complaint summary for employee
+router.get('/employees/:id/complaints', adminAuth, async (req, res) => {
+  try {
+    const month = parseInt(req.query.month) || new Date().getMonth() + 1;
+    const year  = parseInt(req.query.year)  || new Date().getFullYear();
+    const from  = new Date(year, month - 1, 1);
+    const to    = new Date(year, month, 1);
+
+    const jobs = await Job.find({
+      employeeId:            req.params.id,
+      'complaint.raised':    true,
+      'complaint.raisedAt':  { $gte: from, $lt: to },
+    }).populate('customerId', 'customerName carType');
+
+    const result = jobs.map(j => ({
+      jobId:        j._id,
+      date:         j.completedAt?.toISOString().split('T')[0] || null,
+      customerName: j.customerId?.customerName || '',
+      carType:      j.customerId?.carType      || '',
+      serviceType:  j.serviceType,
+      reason:       j.complaint.reason,
+      note:         j.complaint.note,
+      raisedAt:     j.complaint.raisedAt,
+      resolved:     j.complaint.resolved,
+      resolvedAt:   j.complaint.resolvedAt,
+    }));
+
+    res.json({ total: result.length, resolved: result.filter(r => r.resolved).length, complaints: result });
+  } catch (err) { res.status(500).send("Server error"); }
+});
+
+
 router.post('/seed', async (req, res) => {
   try {
     const { name, email, password, secretKey } = req.body;
@@ -485,6 +598,21 @@ router.post('/seed', async (req, res) => {
     const hashed = await bcrypt.hash(password, 10);
     const admin  = await User.create({ name, email, password: hashed, role: 'admin' });
     res.json(admin);
+  } catch (err) { res.status(500).send("Server error"); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ATTENDANCE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// GET /admin/attendance/:employeeId?date=YYYY-MM-DD
+router.get('/attendance/:employeeId', adminAuth, async (req, res) => {
+  try {
+    const date   = req.query.date || new Date().toISOString().split('T')[0];
+    const record = await Attendance.findOne({
+      employeeId: req.params.employeeId, date,
+    });
+    res.json(record || { selfieUrl: null, towelUrls: [], date });
   } catch (err) { res.status(500).send("Server error"); }
 });
 

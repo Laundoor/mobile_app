@@ -1,89 +1,125 @@
-const express = require('express');
-const router  = express.Router();
-const multer  = require('multer');
-const s3      = require('../config/s3');
-const Job     = require('../models/job');
-const User    = require('../models/user');
+const express    = require('express');
+const router     = express.Router();
+const multer     = require('multer');
+const s3         = require('../config/s3');
+const Job        = require('../models/job');
+const User       = require('../models/user');
+const Attendance = require('../models/attendance');
 
 const storage = multer.memoryStorage();
 const upload  = multer({ storage });
 
-// POST /upload?jobId=xxx&photoType=selfie|towel|before|after&label=FrontAngle&employeeId=xxx
-router.post('/', upload.single('image'), async (req, res) => {
-  const file = req.file;
-  if (!file) return res.status(400).send("No file provided");
+// ─── helpers ──────────────────────────────────────────────────────────────────
 
-  const { jobId, photoType, label, employeeId } = req.query;
-  if (!jobId || !photoType) return res.status(400).send("jobId and photoType required");
+function today() {
+  return new Date().toISOString().split('T')[0];
+}
 
-  // Build structured S3 key: jobs/{jobId}/{photoType}-{suffix}.jpg
-  let s3Key;
-  if (photoType === 'selfie') {
-    s3Key = `jobs/${jobId}/selfie.jpg`;
-  } else if (photoType === 'towel') {
-    // Get current towel count to name correctly
-    const job = await Job.findById(jobId);
-    const towelIndex = job ? job.images.towels.length + 1 : 1;
-    s3Key = `jobs/${jobId}/towel-${towelIndex}.jpg`;
-  } else if (photoType === 'before') {
-    s3Key = `jobs/${jobId}/before.jpg`;
-  } else if (photoType === 'after') {
-    const safeLabel = (label || 'photo').toLowerCase().replace(/\s+/g, '-');
-    s3Key = `jobs/${jobId}/after-${safeLabel}.jpg`;
-  } else {
-    s3Key = `jobs/${jobId}/${photoType}.jpg`;
-  }
-
-  // Upload to S3
+async function s3Upload(key, file) {
   const params = {
     Bucket:      process.env.S3_BUCKET,
-    Key:         s3Key,
+    Key:         key,
     Body:        file.buffer,
     ContentType: file.mimetype,
     ACL:         'public-read',
   };
+  const data = await s3.upload(params).promise();
+  return data.Location;
+}
 
-  let s3Url;
-  try {
-    const data = await s3.upload(params).promise();
-    s3Url = data.Location;
-  } catch (err) {
-    console.error("S3 upload error:", err);
-    return res.status(500).send("Upload failed");
+// ─── POST /upload ─────────────────────────────────────────────────────────────
+// photoType: selfie | towel | before | after | towel_soak | cancel
+//
+// selfie / towel  → require employeeId, store in Attendance (no jobId needed)
+// everything else → require jobId
+// ─────────────────────────────────────────────────────────────────────────────
+router.post('/', upload.single('image'), async (req, res) => {
+  const file = req.file;
+  if (!file) return res.status(400).send("No file provided");
+
+  const { photoType, label, employeeId, jobId } = req.query;
+  if (!photoType) return res.status(400).send("photoType required");
+
+  // ── SELFIE → attendance ───────────────────────────────────────────────────
+  if (photoType === 'selfie') {
+    if (!employeeId) return res.status(400).send("employeeId required for selfie");
+    const date   = today();
+    const s3Key  = `attendance/${employeeId}/${date}/selfie.jpg`;
+    let url;
+    try { url = await s3Upload(s3Key, file); }
+    catch (err) { console.error("S3 error:", err); return res.status(500).send("Upload failed"); }
+
+    try {
+      await Attendance.findOneAndUpdate(
+        { employeeId, date },
+        { $set: { selfieUrl: url } },
+        { upsert: true, new: true }
+      );
+    } catch (err) { console.error("DB error:", err); }
+    return res.json({ url });
   }
 
-  // Save URL into the Job document
+  // ── TOWEL → attendance ────────────────────────────────────────────────────
+  if (photoType === 'towel') {
+    if (!employeeId) return res.status(400).send("employeeId required for towel");
+    const date = today();
+
+    const existing = await Attendance.findOne({ employeeId, date });
+    const towelIndex = existing ? existing.towelUrls.length + 1 : 1;
+    const s3Key = `attendance/${employeeId}/${date}/towel-${towelIndex}.jpg`;
+
+    let url;
+    try { url = await s3Upload(s3Key, file); }
+    catch (err) { console.error("S3 error:", err); return res.status(500).send("Upload failed"); }
+
+    try {
+      await Attendance.findOneAndUpdate(
+        { employeeId, date },
+        { $push: { towelUrls: url } },
+        { upsert: true, new: true }
+      );
+    } catch (err) { console.error("DB error:", err); }
+    return res.json({ url });
+  }
+
+  // ── ALL OTHER TYPES → require jobId ──────────────────────────────────────
+  if (!jobId) return res.status(400).send("jobId required");
+
+  let s3Key;
+  if (photoType === 'before') {
+    s3Key = `jobs/${jobId}/before.jpg`;
+  } else if (photoType === 'after') {
+    const safeLabel = (label || 'photo').toLowerCase().replace(/\s+/g, '-');
+    s3Key = `jobs/${jobId}/after-${safeLabel}.jpg`;
+  } else if (photoType === 'towel_soak') {
+    s3Key = `jobs/${jobId}/towel-soak.jpg`;
+  } else if (photoType === 'cancel') {
+    s3Key = `jobs/${jobId}/cancel.jpg`;
+  } else {
+    s3Key = `jobs/${jobId}/${photoType}.jpg`;
+  }
+
+  let s3Url;
+  try { s3Url = await s3Upload(s3Key, file); }
+  catch (err) { console.error("S3 error:", err); return res.status(500).send("Upload failed"); }
+
   try {
     const job = await Job.findById(jobId);
     if (!job) return res.status(404).send("Job not found");
 
-    if (photoType === 'selfie') {
-      job.images.selfie = s3Url;
-
-    } else if (photoType === 'towel') {
-      if (job.images.towels.length < 6) {
-        job.images.towels.push(s3Url);
-      }
-
-    } else if (photoType === 'before') {
+    if (photoType === 'before') {
       job.images.before = s3Url;
-      job.beforeUploadedAt = new Date(); // exact timestamp for share message
-      // Mark employee active for today
+      job.beforeUploadedAt = new Date();
       if (employeeId) {
-        const today = new Date().toISOString().split('T')[0];
         await User.findByIdAndUpdate(employeeId, {
-          isActive:       true,
-          lastActiveDate: today,
+          isActive: true, lastActiveDate: today(),
         });
       }
-
     } else if (photoType === 'after') {
       const afterLabel = label || `Photo ${job.images.after.length + 1}`;
       job.images.after.push({ label: afterLabel, url: s3Url });
-
     } else if (photoType === 'towel_soak') {
       job.images.towelSoak = s3Url;
-
     } else if (photoType === 'cancel') {
       job.cancelPhotoUrl = s3Url;
     }
@@ -91,13 +127,12 @@ router.post('/', upload.single('image'), async (req, res) => {
     await job.save();
   } catch (err) {
     console.error("DB save error:", err);
-    // Still return URL — client can handle retry
   }
 
   res.json({ url: s3Url });
 });
 
-// POST /upload/employee-doc?empId=xxx&docType=profile|aadhaar_front|aadhaar_back|pan_front|pan_back
+// ─── POST /upload/employee-doc ────────────────────────────────────────────────
 router.post('/employee-doc', upload.single('image'), async (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).send("No file provided");
@@ -109,31 +144,13 @@ router.post('/employee-doc', upload.single('image'), async (req, res) => {
   if (!allowed.includes(docType)) return res.status(400).send("Invalid docType");
 
   const s3Key = `employees/${empId}/${docType}.jpg`;
-  const params = {
-    Bucket:      process.env.S3_BUCKET,
-    Key:         s3Key,
-    Body:        file.buffer,
-    ContentType: file.mimetype,
-    ACL:         'public-read',
-  };
-
   let s3Url;
-  try {
-    const data = await s3.upload(params).promise();
-    s3Url = data.Location;
-  } catch (err) {
-    console.error("S3 upload error:", err);
-    return res.status(500).send("Upload failed");
-  }
+  try { s3Url = await s3Upload(s3Key, file); }
+  catch (err) { console.error("S3 error:", err); return res.status(500).send("Upload failed"); }
 
   try {
-    const User = require('../models/user');
-    await User.findByIdAndUpdate(empId, {
-      [`photos.${docType}`]: s3Url,
-    });
-  } catch (err) {
-    console.error("DB save error:", err);
-  }
+    await User.findByIdAndUpdate(empId, { [`photos.${docType}`]: s3Url });
+  } catch (err) { console.error("DB save error:", err); }
 
   res.json({ url: s3Url });
 });
