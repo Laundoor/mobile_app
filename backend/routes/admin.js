@@ -606,14 +606,59 @@ router.post('/seed', async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // GET /admin/attendance/:employeeId?date=YYYY-MM-DD
+// Returns attendance record + towelSoakUrl from first completed/in-progress job that day
 router.get('/attendance/:employeeId', adminAuth, async (req, res) => {
   try {
     const date   = req.query.date || new Date().toISOString().split('T')[0];
     const record = await Attendance.findOne({
       employeeId: req.params.employeeId, date,
     });
-    res.json(record || { selfieUrl: null, towelUrls: [], date });
-  } catch (err) { res.status(500).send("Server error"); }
+
+    // Find towelSoak from first job that has one on this date
+    const startOfDay = new Date(`${date}T00:00:00.000Z`);
+    const endOfDay   = new Date(`${date}T23:59:59.999Z`);
+    const jobWithSoak = await Job.findOne({
+      employeeId:          req.params.employeeId,
+      assignedDate:        date,
+      'images.towelSoak':  { $ne: null },
+    });
+
+    const response = record
+      ? record.toObject()
+      : { selfieUrl: null, towelUrls: [], date,
+          selfieApproval: 'pending', towelsApproval: 'pending', towelSoakApproval: 'pending' };
+
+    response.towelSoakUrl  = jobWithSoak?.images?.towelSoak || null;
+    response.towelSoakJobId = jobWithSoak?._id?.toString() || null;
+
+    res.json(response);
+  } catch (err) { console.error(err); res.status(500).send("Server error"); }
+});
+
+// PATCH /admin/attendance/:employeeId/approve?date=YYYY-MM-DD
+// body: { type: 'selfie'|'towels'|'towelSoak', status: 'approved'|'rejected' }
+router.patch('/attendance/:employeeId/approve', adminAuth, async (req, res) => {
+  try {
+    const date   = req.query.date || new Date().toISOString().split('T')[0];
+    const { type, status } = req.body;
+
+    const fieldMap = {
+      selfie:    'selfieApproval',
+      towels:    'towelsApproval',
+      towelSoak: 'towelSoakApproval',
+    };
+    const field = fieldMap[type];
+    if (!field) return res.status(400).send("Invalid type");
+    if (!['approved', 'rejected'].includes(status))
+      return res.status(400).send("Invalid status");
+
+    const record = await Attendance.findOneAndUpdate(
+      { employeeId: req.params.employeeId, date },
+      { $set: { [field]: status } },
+      { upsert: true, new: true }
+    );
+    res.json(record);
+  } catch (err) { console.error(err); res.status(500).send("Server error"); }
 });
 
 module.exports = router;
