@@ -610,9 +610,13 @@ router.post('/seed', async (req, res) => {
 router.get('/attendance/:employeeId', adminAuth, async (req, res) => {
   try {
     const date   = req.query.date || new Date().toISOString().split('T')[0];
+    console.log(`[attendance] GET employeeId=${req.params.employeeId} date=${date}`);
+
     const record = await Attendance.findOne({
       employeeId: req.params.employeeId, date,
     });
+    console.log(`[attendance] record found:`, record ? 'yes' : 'no',
+      record ? `selfie=${!!record.selfieUrl} towels=${record.towelUrls.length}` : '');
 
     // Find towelSoak from first job that has one on this date
     const startOfDay = new Date(`${date}T00:00:00.000Z`);
