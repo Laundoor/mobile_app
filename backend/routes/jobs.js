@@ -4,10 +4,17 @@ const Job      = require('../models/job');
 const Customer = require('../models/customer');
 const User     = require('../models/user');
 
+// Returns current date in IST (UTC+5:30) as YYYY-MM-DD
+function todayIST() {
+  const now = new Date();
+  const ist = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+  return ist.toISOString().split('T')[0];
+}
+
 // ── GET /jobs/employee/:employeeId — today's jobs for an employee ─────────────
 router.get('/employee/:employeeId', async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayIST();
     const jobs  = await Job.find({
       employeeId:   req.params.employeeId,
       assignedDate: today,
@@ -41,7 +48,7 @@ router.post('/', async (req, res) => {
     if (!customerId || !employeeId || !serviceType)
       return res.status(400).send("customerId, employeeId, serviceType required");
 
-    const today = assignedDate || new Date().toISOString().split('T')[0];
+    const today = assignedDate || todayIST();
 
     // Prevent duplicate assignment: same customer, same employee, same day
     const duplicate = await Job.findOne({
@@ -125,7 +132,7 @@ router.put('/:id/cancel', async (req, res) => {
 // ── GET /jobs/day-summary/:employeeId — summary for today ─────────────────────
 router.get('/day-summary/:employeeId', async (req, res) => {
   try {
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayIST();
     const jobs  = await Job.find({
       employeeId:   req.params.employeeId,
       assignedDate: today,

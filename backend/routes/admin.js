@@ -9,6 +9,13 @@ const Config   = require('../models/config');
 const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
 
+// Returns current date in IST (UTC+5:30) as YYYY-MM-DD
+function todayIST() {
+  const now = new Date();
+  const ist = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+  return ist.toISOString().split('T')[0];
+}
+
 // ── MIDDLEWARE ────────────────────────────────────────────────────────────────
 function adminAuth(req, res, next) {
   const header = req.headers['authorization'];
@@ -102,7 +109,7 @@ const DEFAULT_PRICING = {
 // ═══════════════════════════════════════════════════════════════════════════
 router.get('/dashboard', adminAuth, async (req, res) => {
   try {
-    const today     = new Date().toISOString().split('T')[0];
+    const today     = todayIST();
     const employees = await User.find({ role: 'employee' }).select('-password');
     const allJobs   = await Job.find({ assignedDate: today });
     const data = employees.map(emp => {
@@ -142,7 +149,7 @@ router.post('/employees', adminAuth, async (req, res) => {
 
 router.get('/employees', adminAuth, async (req, res) => {
   try {
-    const today     = new Date().toISOString().split('T')[0];
+    const today     = todayIST();
     const employees = await User.find({ role: 'employee' }).select('-password');
     const allJobs   = await Job.find({ assignedDate: today });
     const result = employees.map(emp => {
@@ -165,7 +172,7 @@ router.get('/employees/:id', adminAuth, async (req, res) => {
   try {
     const emp = await User.findById(req.params.id).select('-password');
     if (!emp) return res.status(404).send("Employee not found");
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayIST();
     const jobs  = await Job.find({
       employeeId: req.params.id, assignedDate: today,
     }).populate('customerId');
@@ -271,7 +278,7 @@ router.post('/assign', adminAuth, async (req, res) => {
     const { customerId, employeeId, serviceType, assignedDate } = req.body;
     if (!customerId || !employeeId || !serviceType)
       return res.status(400).send("customerId, employeeId, serviceType required");
-    const today    = assignedDate || new Date().toISOString().split('T')[0];
+    const today    = assignedDate || todayIST();
     const existing = await Job.findOne({
       customerId, assignedDate: today, status: { $nin: ['Cancelled'] },
     });
@@ -291,7 +298,7 @@ router.post('/assign', adminAuth, async (req, res) => {
 // GET /admin/planner/:employeeId?date=YYYY-MM-DD — jobs for employee on date
 router.get('/planner/:employeeId', adminAuth, async (req, res) => {
   try {
-    const date = req.query.date || new Date().toISOString().split('T')[0];
+    const date = req.query.date || todayIST();
     const jobs = await Job.find({
       employeeId:   req.params.employeeId,
       assignedDate: date,
@@ -388,10 +395,11 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
     const isPayable = (job) =>
       !job.complaint?.raised || job.complaint?.resolved === true;
 
-    // Group by date — only payable jobs count for distance
+    // Group by date (IST) — only payable jobs count for distance
     const byDate = {};
     for (const job of jobs) {
-      const dk = job.completedAt.toISOString().split('T')[0];
+      const ist = new Date(job.completedAt.getTime() + 5.5 * 60 * 60 * 1000);
+      const dk  = ist.toISOString().split('T')[0];
       if (!byDate[dk]) byDate[dk] = [];
       byDate[dk].push(job);
     }
@@ -573,7 +581,9 @@ router.get('/employees/:id/complaints', adminAuth, async (req, res) => {
 
     const result = jobs.map(j => ({
       jobId:        j._id,
-      date:         j.completedAt?.toISOString().split('T')[0] || null,
+      date:         j.completedAt
+                      ? new Date(j.completedAt.getTime() + 5.5*60*60*1000).toISOString().split('T')[0]
+                      : null,
       customerName: j.customerId?.customerName || '',
       carType:      j.customerId?.carType      || '',
       serviceType:  j.serviceType,
@@ -609,7 +619,7 @@ router.post('/seed', async (req, res) => {
 // Returns attendance record + towelSoakUrl from first completed/in-progress job that day
 router.get('/attendance/:employeeId', adminAuth, async (req, res) => {
   try {
-    const date   = req.query.date || new Date().toISOString().split('T')[0];
+    const date   = req.query.date || todayIST();
     console.log(`[attendance] GET employeeId=${req.params.employeeId} date=${date}`);
 
     const record = await Attendance.findOne({
@@ -643,7 +653,7 @@ router.get('/attendance/:employeeId', adminAuth, async (req, res) => {
 // body: { type: 'selfie'|'towels'|'towelSoak', status: 'approved'|'rejected' }
 router.patch('/attendance/:employeeId/approve', adminAuth, async (req, res) => {
   try {
-    const date   = req.query.date || new Date().toISOString().split('T')[0];
+    const date   = req.query.date || todayIST();
     const { type, status } = req.body;
 
     const fieldMap = {
