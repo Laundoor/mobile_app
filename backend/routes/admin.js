@@ -629,8 +629,6 @@ router.get('/attendance/:employeeId', adminAuth, async (req, res) => {
       record ? `selfie=${!!record.selfieUrl} towels=${record.towelUrls.length}` : '');
 
     // Find towelSoak from first job that has one on this date
-    const startOfDay = new Date(`${date}T00:00:00.000Z`);
-    const endOfDay   = new Date(`${date}T23:59:59.999Z`);
     const jobWithSoak = await Job.findOne({
       employeeId:          req.params.employeeId,
       assignedDate:        date,
