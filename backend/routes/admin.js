@@ -175,7 +175,7 @@ router.get('/employees/:id', adminAuth, async (req, res) => {
     const today = todayIST();
     const jobs  = await Job.find({
       employeeId: req.params.id, assignedDate: today,
-    }).populate('customerId');
+    }).populate('customerId').sort({ sortOrder: 1 });
     res.json({ employee: emp, jobs });
   } catch (err) { res.status(500).send("Server error"); }
 });
