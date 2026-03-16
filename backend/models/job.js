@@ -37,6 +37,7 @@ const jobSchema = new mongoose.Schema({
   beforeUploadedAt:  { type: Date, default: null },
   cancelledAt:       { type: Date, default: null },
   cancelPhotoUrl:    { type: String, default: null },
+  cancelReason:      { type: String, default: null },
 
   complaint: {
     raised:     { type: Boolean, default: false },

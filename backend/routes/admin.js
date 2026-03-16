@@ -431,15 +431,19 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
           totalJobEarnings += earnings;
         }
         jobDetails.push({
-          jobId:        job._id,
+          jobId:         job._id,
           date,
-          customerName: customer?.customerName || '',
+          customerName:  customer?.customerName || '',
           carType,
-          carModel:     customer?.carModel     || '',
-          vehicleNo:    customer?.vehicleNumber || '',
-          serviceType:  job.serviceType,
-          serviceCount: job.serviceCount,
+          carModel:      customer?.carModel     || '',
+          vehicleNo:     customer?.vehicleNumber || '',
+          serviceType:   job.serviceType,
+          serviceCount:  job.serviceCount,
+          status:        job.status,
           earnings,
+          cancelPhotoUrl: job.cancelPhotoUrl || null,
+          cancelReason:   job.cancelReason   || null,
+          cancelledAt:    job.cancelledAt    || null,
           complaint: job.complaint?.raised ? {
             raised:    job.complaint.raised,
             resolved:  job.complaint.resolved,
@@ -450,11 +454,19 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         });
       }
 
-      // Daily distance — skip stops with unresolved complaints
+      // Daily distance — sort by sortOrder, include cancelled jobs
       if (home) {
-        const payableJobs = dayJobs.filter(isPayable);
-        const waypoints   = [];
-        for (const job of payableJobs) {
+        const eligibleJobs = dayJobs
+          .filter(job => {
+            const payable = isPayable(job);
+            // Completed payable jobs + all cancelled jobs count for distance
+            return (job.status === 'Completed' && payable) ||
+                    job.status === 'Cancelled';
+          })
+          .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+
+        const waypoints = [];
+        for (const job of eligibleJobs) {
           const customer = job.customerId;
           let coords = null;
           if (customer?.location?.lat) {

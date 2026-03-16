@@ -112,16 +112,17 @@ router.put('/:id/status', async (req, res) => {
 });
 
 // ── PUT /jobs/:id/cancel — cancel job with photo URL ─────────────────────────
-// Body: { cancelPhotoUrl }
+// Body: { cancelPhotoUrl, cancelReason }
 router.put('/:id/cancel', async (req, res) => {
   try {
-    const { cancelPhotoUrl } = req.body;
+    const { cancelPhotoUrl, cancelReason } = req.body;
     const job = await Job.findById(req.params.id);
     if (!job) return res.status(404).send("Job not found");
 
     job.status         = 'Cancelled';
     job.cancelledAt    = new Date();
     job.cancelPhotoUrl = cancelPhotoUrl || null;
+    job.cancelReason   = cancelReason   || null;
     await job.save();
     res.json(job);
   } catch (err) {
@@ -158,10 +159,12 @@ router.get('/day-summary/:employeeId', async (req, res) => {
         return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
       };
 
-      const doneJobs = jobs.filter(j =>
-        (j.status === 'Completed' || j.status === 'Cancelled') &&
-        j.customerId?.location?.lat
-      );
+      const doneJobs = jobs
+        .filter(j =>
+          (j.status === 'Completed' || j.status === 'Cancelled') &&
+          j.customerId?.location?.lat
+        )
+        .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
 
       if (doneJobs.length > 0) {
         let prev = emp.homeLocation;
