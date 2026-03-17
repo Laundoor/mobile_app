@@ -1,4 +1,5 @@
 const express  = require('express');
+const axios    = require('axios');
 const router   = express.Router();
 const Job      = require('../models/job');
 const Customer = require('../models/customer');
@@ -143,21 +144,12 @@ router.get('/day-summary/:employeeId', async (req, res) => {
     const completed = jobs.filter(j => j.status === 'Completed').length;
     const cancelled = jobs.filter(j => j.status === 'Cancelled').length;
 
-    // Distance: sum haversine for each completed/cancelled job from employee home
-    const User = require('../models/user');
+    // Distance: Google Distance Matrix API (driving), fallback to haversine
     const emp  = await User.findById(req.params.employeeId);
 
     let distanceKm = 0;
     if (emp?.homeLocation?.lat) {
-      const haversine = (lat1, lng1, lat2, lng2) => {
-        const R    = 6371;
-        const dLat = (lat2 - lat1) * Math.PI / 180;
-        const dLng = (lng2 - lng1) * Math.PI / 180;
-        const a    = Math.sin(dLat/2)**2 +
-                     Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) *
-                     Math.sin(dLng/2)**2;
-        return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      };
+      const home = emp.homeLocation;
 
       const doneJobs = jobs
         .filter(j =>
@@ -167,17 +159,82 @@ router.get('/day-summary/:employeeId', async (req, res) => {
         .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
 
       if (doneJobs.length > 0) {
-        let prev = emp.homeLocation;
-        for (const j of doneJobs) {
-          const loc = j.customerId.location;
-          distanceKm += haversine(prev.lat, prev.lng, loc.lat, loc.lng);
-          prev = loc;
+        const waypoints   = doneJobs.map(j => ({
+          lat: j.customerId.location.lat,
+          lng: j.customerId.location.lng,
+        }));
+        const routePoints = [home, ...waypoints, home];
+        const apiKey      = process.env.LOCATION_KEY;
+
+        if (apiKey && routePoints.length <= 26) {
+          try {
+            const origins  = routePoints.slice(0, -1);
+            const dests    = routePoints.slice(1);
+            const origStr  = origins.map(p => `${p.lat},${p.lng}`).join('|');
+            const destStr  = dests.map(p => `${p.lat},${p.lng}`).join('|');
+            const url = `https://maps.googleapis.com/maps/api/distancematrix/json` +
+                        `?origins=${origStr}&destinations=${destStr}` +
+                        `&mode=driving&units=metric&key=${apiKey}`;
+            const { data } = await axios.get(url, { timeout: 10000 });
+
+            if (data?.status === 'OK') {
+              for (let i = 0; i < origins.length; i++) {
+                const el = data.rows?.[i]?.elements?.[i];
+                if (el?.status === 'OK') {
+                  distanceKm += el.distance.value / 1000;
+                } else {
+                  // haversine fallback for this leg
+                  const o = origins[i], d = dests[i];
+                  const dLat = (d.lat - o.lat) * Math.PI / 180;
+                  const dLng = (d.lng - o.lng) * Math.PI / 180;
+                  const a = Math.sin(dLat/2)**2 +
+                    Math.cos(o.lat*Math.PI/180) * Math.cos(d.lat*Math.PI/180) *
+                    Math.sin(dLng/2)**2;
+                  distanceKm += 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+                }
+              }
+            } else {
+              throw new Error(data?.status);
+            }
+          } catch (err) {
+            console.warn('[day-summary] Google Distance fallback:', err.message);
+            // Full haversine fallback
+            let prev = home;
+            for (const wp of waypoints) {
+              const dLat = (wp.lat - prev.lat) * Math.PI / 180;
+              const dLng = (wp.lng - prev.lng) * Math.PI / 180;
+              const a = Math.sin(dLat/2)**2 +
+                Math.cos(prev.lat*Math.PI/180) * Math.cos(wp.lat*Math.PI/180) *
+                Math.sin(dLng/2)**2;
+              distanceKm += 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+              prev = wp;
+            }
+            const dLat = (home.lat - prev.lat) * Math.PI / 180;
+            const dLng = (home.lng - prev.lng) * Math.PI / 180;
+            const a = Math.sin(dLat/2)**2 +
+              Math.cos(prev.lat*Math.PI/180) * Math.cos(home.lat*Math.PI/180) *
+              Math.sin(dLng/2)**2;
+            distanceKm += 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+          }
+        } else {
+          // No API key — haversine
+          let prev = home;
+          for (const wp of waypoints) {
+            const dLat = (wp.lat - prev.lat) * Math.PI / 180;
+            const dLng = (wp.lng - prev.lng) * Math.PI / 180;
+            const a = Math.sin(dLat/2)**2 +
+              Math.cos(prev.lat*Math.PI/180) * Math.cos(wp.lat*Math.PI/180) *
+              Math.sin(dLng/2)**2;
+            distanceKm += 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            prev = wp;
+          }
+          const dLat = (home.lat - prev.lat) * Math.PI / 180;
+          const dLng = (home.lng - prev.lng) * Math.PI / 180;
+          const a = Math.sin(dLat/2)**2 +
+            Math.cos(prev.lat*Math.PI/180) * Math.cos(home.lat*Math.PI/180) *
+            Math.sin(dLng/2)**2;
+          distanceKm += 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
         }
-        // Return home
-        distanceKm += haversine(
-          prev.lat, prev.lng,
-          emp.homeLocation.lat, emp.homeLocation.lng
-        );
       }
     }
 

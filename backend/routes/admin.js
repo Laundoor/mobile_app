@@ -86,7 +86,7 @@ async function extractLatLng(url) {
 
 
 
-// Haversine distance in KM
+// Haversine distance in KM — used as fallback
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R    = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -95,6 +95,73 @@ function haversineKm(lat1, lng1, lat2, lng2) {
                Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) *
                Math.sin(dLng/2)**2;
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// Compute total route distance for one day using Google Distance Matrix API
+// Points = [home, C1, C2, ..., Cn, home] — batched in ONE API call
+// Falls back to haversine if API unavailable
+async function computeDayDistanceKm(points) {
+  if (points.length < 2) return 0;
+
+  const apiKey = process.env.LOCATION_KEY;
+
+  // Build consecutive leg pairs: [home→C1, C1→C2, ..., Cn→home]
+  const origins      = points.slice(0, -1);
+  const destinations = points.slice(1);
+
+  // Google Distance Matrix allows max 25 origins and 25 destinations
+  // For a normal day (≤24 stops) this is always one call
+  if (apiKey && origins.length <= 25) {
+    try {
+      const origStr = origins.map(p => `${p.lat},${p.lng}`).join('|');
+      const destStr = destinations.map(p => `${p.lat},${p.lng}`).join('|');
+      const url = `https://maps.googleapis.com/maps/api/distancematrix/json` +
+                  `?origins=${origStr}` +
+                  `&destinations=${destStr}` +
+                  `&mode=driving` +
+                  `&units=metric` +
+                  `&key=${apiKey}`;
+
+      const { data } = await axios.get(url, { timeout: 10000 });
+
+      if (data?.status === 'OK') {
+        let totalKm = 0;
+        let allOk   = true;
+        for (let i = 0; i < origins.length; i++) {
+          const element = data.rows?.[i]?.elements?.[i];
+          if (element?.status === 'OK') {
+            totalKm += element.distance.value / 1000;
+          } else {
+            // This leg failed — fall back to haversine for this leg only
+            console.warn(`[distance] Leg ${i} fallback:`, element?.status);
+            totalKm += haversineKm(
+              origins[i].lat, origins[i].lng,
+              destinations[i].lat, destinations[i].lng
+            );
+            allOk = false;
+          }
+        }
+        if (!allOk) console.warn('[distance] Some legs used haversine fallback');
+        return parseFloat(totalKm.toFixed(2));
+      } else {
+        console.error('[distance] Matrix API error:', data?.status, data?.error_message);
+      }
+    } catch (err) {
+      console.error('[distance] Matrix API request failed:', err.message);
+    }
+  } else if (!apiKey) {
+    console.warn('[distance] No LOCATION_KEY — using haversine fallback');
+  }
+
+  // Full haversine fallback for entire day
+  let totalKm = 0;
+  for (let i = 0; i < origins.length; i++) {
+    totalKm += haversineKm(
+      origins[i].lat, origins[i].lng,
+      destinations[i].lat, destinations[i].lng
+    );
+  }
+  return parseFloat(totalKm.toFixed(2));
 }
 
 const DEFAULT_PRICING = {
@@ -406,9 +473,10 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
 
     const jobDetails    = [];
     const carTypeCounts = { Hatchback: 0, Sedan: 0, SUV: 0 };
-    let totalJobEarnings      = 0;
-    let totalDistanceKm       = 0;
-    let totalDistanceEarnings = 0;
+    let totalJobEarnings       = 0;
+    let totalDistanceKm        = 0;
+    let totalDistanceEarnings  = 0;
+    let totalSkippedCustomers  = 0; // customers with no coords — excluded from distance
 
     const home = employee.homeLocation?.lat ? employee.homeLocation : null;
 
@@ -459,13 +527,13 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         const eligibleJobs = dayJobs
           .filter(job => {
             const payable = isPayable(job);
-            // Completed payable jobs + all cancelled jobs count for distance
             return (job.status === 'Completed' && payable) ||
                     job.status === 'Cancelled';
           })
           .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
 
         const waypoints = [];
+        let skipped = 0;
         for (const job of eligibleJobs) {
           const customer = job.customerId;
           let coords = null;
@@ -474,18 +542,21 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
           } else if (customer?.mapsLink) {
             coords = await extractLatLng(customer.mapsLink);
           }
-          if (coords) waypoints.push(coords);
-        }
-        if (waypoints.length > 0) {
-          let dayKm = 0;
-          let prev  = home;
-          for (const wp of waypoints) {
-            dayKm += haversineKm(prev.lat, prev.lng, wp.lat, wp.lng);
-            prev   = wp;
+          if (coords) {
+            waypoints.push(coords);
+          } else {
+            skipped++;
+            console.warn(`[salary] No coords for customer: ${customer?.customerName} (${customer?._id})`);
           }
-          dayKm += haversineKm(prev.lat, prev.lng, home.lat, home.lng);
+        }
+
+        if (waypoints.length > 0) {
+          // Build full route: home → C1 → C2 → ... → Cn → home
+          const routePoints = [home, ...waypoints, home];
+          const dayKm = await computeDayDistanceKm(routePoints);
           totalDistanceKm       += dayKm;
           totalDistanceEarnings += dayKm * (pricing.distancePerKm ?? 2);
+          if (skipped > 0) totalSkippedCustomers += skipped;
         }
       }
     }
@@ -506,6 +577,7 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         totalDistanceKm:      parseFloat(totalDistanceKm.toFixed(2)),
         totalDistanceEarnings:parseFloat(totalDistanceEarnings.toFixed(2)),
         grandTotal:           parseFloat((totalJobEarnings + totalDistanceEarnings).toFixed(2)),
+        skippedCustomers:     totalSkippedCustomers,
       },
       jobDetails,
     });
