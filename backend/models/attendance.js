@@ -6,10 +6,18 @@ const attendanceSchema = new mongoose.Schema({
   selfieUrl:  { type: String, default: null },
   towelUrls:  { type: [String], default: [] },
 
-  // Admin approval per photo type
-  selfieApproval:    { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
-  towelsApproval:    { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
-  towelSoakApproval: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+  // Soak photos (moved from Job)
+  towelSoakUrl:  { type: String, default: null },
+  dusterSoakUrl: { type: String, default: null }, // Saturdays only
+
+  // Admin approvals
+  selfieApproval:     { type: String, enum: ['pending','approved','rejected'], default: 'pending' },
+  towelsApproval:     { type: String, enum: ['pending','approved','rejected'], default: 'pending' },
+  towelSoakApproval:  { type: String, enum: ['pending','approved','rejected'], default: 'pending' },
+  dusterSoakApproval: { type: String, enum: ['pending','approved','rejected'], default: 'pending' },
+
+  // Incentive
+  incentiveExcused: { type: Boolean, default: false }, // admin excuse pass
 }, { timestamps: true });
 
 // One record per employee per day

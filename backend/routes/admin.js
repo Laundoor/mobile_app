@@ -169,6 +169,7 @@ const DEFAULT_PRICING = {
   interiorStandard: 40,
   interiorPremium:  60,
   distancePerKm:    2,
+  dailyIncentive:   100,
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -564,6 +565,26 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
     const complainedJobs  = jobs.filter(j => j.complaint?.raised && !j.complaint?.resolved);
     const resolvedJobs    = jobs.filter(j => j.complaint?.raised &&  j.complaint?.resolved);
 
+    // Incentive — compute per working day (days that have attendance records)
+    const attendanceRecords = await Attendance.find({
+      employeeId,
+      date: { $gte: from.toISOString().split('T')[0], $lte: to.toISOString().split('T')[0] },
+    });
+
+    let totalIncentive = 0;
+    const incentiveDetails = [];
+    for (const record of attendanceRecords) {
+      const inc = await computeIncentive(record, employeeId, record.date, pricing);
+      if (inc.earned) totalIncentive += inc.amount;
+      incentiveDetails.push({
+        date:     record.date,
+        earned:   inc.earned,
+        excused:  inc.excused || false,
+        amount:   inc.amount,
+        reasons:  inc.reasons,
+      });
+    }
+
     res.json({
       employee: { id: employee._id, name: employee.name, email: employee.email,
                   hasHomeLocation: !!home },
@@ -576,10 +597,12 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         totalJobEarnings:     parseFloat(totalJobEarnings.toFixed(2)),
         totalDistanceKm:      parseFloat(totalDistanceKm.toFixed(2)),
         totalDistanceEarnings:parseFloat(totalDistanceEarnings.toFixed(2)),
-        grandTotal:           parseFloat((totalJobEarnings + totalDistanceEarnings).toFixed(2)),
+        totalIncentive:       parseFloat(totalIncentive.toFixed(2)),
+        grandTotal:           parseFloat((totalJobEarnings + totalDistanceEarnings + totalIncentive).toFixed(2)),
         skippedCustomers:     totalSkippedCustomers,
       },
       jobDetails,
+      incentiveDetails,
     });
   } catch (err) {
     console.error('[Salary]', err);
@@ -699,53 +722,101 @@ router.post('/seed', async (req, res) => {
 // ATTENDANCE
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Helper: compute incentive eligibility for one attendance record + day's jobs
+// Returns { earned: bool, reasons: string[] }
+async function computeIncentive(record, employeeId, date, pricing) {
+  const incentiveAmt  = pricing.dailyIncentive ?? 100;
+  const isSaturday    = new Date(date + 'T00:00:00+05:30').getDay() === 6;
+  const reasons       = [];
+
+  if (!record) return { earned: false, amount: 0, reasons: ['No attendance record for this day'] };
+  if (record.incentiveExcused) return { earned: true, excused: true, amount: incentiveAmt, reasons: [] };
+
+  // 1. Selfie approved
+  if (record.selfieApproval !== 'approved') reasons.push('selfie');
+
+  // 2. Towels approved
+  if (record.towelsApproval !== 'approved') reasons.push('towels');
+
+  // 3. Towel soak uploaded + approved
+  if (!record.towelSoakUrl) reasons.push('towelSoakMissing');
+  else if (record.towelSoakApproval !== 'approved') reasons.push('towelSoak');
+
+  // 4. Duster soak uploaded + approved (Saturdays only)
+  if (isSaturday) {
+    if (!record.dusterSoakUrl) reasons.push('dusterSoakMissing');
+    else if (record.dusterSoakApproval !== 'approved') reasons.push('dusterSoak');
+  }
+
+  // 5. Before photo of first job on or before 06:15 IST
+  const firstJob = await Job.findOne({ employeeId, assignedDate: date })
+    .sort({ sortOrder: 1 });
+  if (firstJob?.beforeUploadedAt) {
+    const ist   = new Date(firstJob.beforeUploadedAt.getTime() + 5.5 * 60 * 60 * 1000);
+    const hhmm  = ist.getHours() * 60 + ist.getMinutes();
+    if (hhmm > 6 * 60 + 15) reasons.push('late'); // after 06:15
+  } else {
+    reasons.push('late'); // no before photo at all
+  }
+
+  // 6. No complaints raised that day
+  const complainedJob = await Job.findOne({
+    employeeId,
+    assignedDate: date,
+    'complaint.raised': true,
+  });
+  if (complainedJob) reasons.push('complaint');
+
+  return {
+    earned:  reasons.length === 0,
+    amount:  reasons.length === 0 ? incentiveAmt : 0,
+    reasons,
+    isSaturday,
+  };
+}
+
 // GET /admin/attendance/:employeeId?date=YYYY-MM-DD
-// Returns attendance record + towelSoakUrl from first completed/in-progress job that day
 router.get('/attendance/:employeeId', adminAuth, async (req, res) => {
   try {
-    const date   = req.query.date || todayIST();
-    console.log(`[attendance] GET employeeId=${req.params.employeeId} date=${date}`);
+    const date     = req.query.date || todayIST();
+    const empId    = req.params.employeeId;
 
-    const record = await Attendance.findOne({
-      employeeId: req.params.employeeId, date,
-    });
-    console.log(`[attendance] record found:`, record ? 'yes' : 'no',
-      record ? `selfie=${!!record.selfieUrl} towels=${record.towelUrls.length}` : '');
+    const record = await Attendance.findOne({ employeeId: empId, date });
 
-    // Find towelSoak from first job that has one on this date
-    const jobWithSoak = await Job.findOne({
-      employeeId:          req.params.employeeId,
-      assignedDate:        date,
-      'images.towelSoak':  { $ne: null },
-    });
+    const configDoc = await Config.findOne({ key: 'pricing' });
+    const pricing   = configDoc ? configDoc.value : DEFAULT_PRICING;
 
     const response = record
       ? record.toObject()
       : { selfieUrl: null, towelUrls: [], date,
-          selfieApproval: 'pending', towelsApproval: 'pending', towelSoakApproval: 'pending' };
+          selfieApproval: 'pending', towelsApproval: 'pending',
+          towelSoakApproval: 'pending', dusterSoakApproval: 'pending',
+          incentiveExcused: false };
 
-    response.towelSoakUrl  = jobWithSoak?.images?.towelSoak || null;
-    response.towelSoakJobId = jobWithSoak?._id?.toString() || null;
+    // Incentive computation
+    const incentive = await computeIncentive(record, empId, date, pricing);
+    response.incentive = incentive;
 
     res.json(response);
   } catch (err) { console.error(err); res.status(500).send("Server error"); }
 });
 
 // PATCH /admin/attendance/:employeeId/approve?date=YYYY-MM-DD
-// body: { type: 'selfie'|'towels'|'towelSoak', status: 'approved'|'rejected' }
+// body: { type: 'selfie'|'towels'|'towelSoak'|'dusterSoak', status: 'approved'|'rejected'|'pending' }
 router.patch('/attendance/:employeeId/approve', adminAuth, async (req, res) => {
   try {
     const date   = req.query.date || todayIST();
     const { type, status } = req.body;
 
     const fieldMap = {
-      selfie:    'selfieApproval',
-      towels:    'towelsApproval',
-      towelSoak: 'towelSoakApproval',
+      selfie:     'selfieApproval',
+      towels:     'towelsApproval',
+      towelSoak:  'towelSoakApproval',
+      dusterSoak: 'dusterSoakApproval',
     };
     const field = fieldMap[type];
     if (!field) return res.status(400).send("Invalid type");
-    if (!['approved', 'rejected'].includes(status))
+    if (!['approved', 'rejected', 'pending'].includes(status))
       return res.status(400).send("Invalid status");
 
     const record = await Attendance.findOneAndUpdate(
@@ -754,6 +825,38 @@ router.patch('/attendance/:employeeId/approve', adminAuth, async (req, res) => {
       { upsert: true, new: true }
     );
     res.json(record);
+  } catch (err) { console.error(err); res.status(500).send("Server error"); }
+});
+
+// PATCH /admin/attendance/:employeeId/excuse?date=YYYY-MM-DD
+// Excuse pass — grants incentive regardless of criteria
+router.patch('/attendance/:employeeId/excuse', adminAuth, async (req, res) => {
+  try {
+    const date   = req.query.date || todayIST();
+    const { excused } = req.body; // true or false
+
+    const record = await Attendance.findOneAndUpdate(
+      { employeeId: req.params.employeeId, date },
+      { $set: { incentiveExcused: !!excused } },
+      { upsert: true, new: true }
+    );
+    res.json(record);
+  } catch (err) { console.error(err); res.status(500).send("Server error"); }
+});
+
+// GET /admin/attendance/:employeeId/incentive-status?date=YYYY-MM-DD
+// Used by employee app incentive tab — returns criteria breakdown for date
+router.get('/attendance/:employeeId/incentive-status', async (req, res) => {
+  try {
+    const date    = req.query.date || todayIST();
+    const empId   = req.params.employeeId;
+    const record  = await Attendance.findOne({ employeeId: empId, date });
+
+    const configDoc = await Config.findOne({ key: 'pricing' });
+    const pricing   = configDoc ? configDoc.value : DEFAULT_PRICING;
+
+    const incentive = await computeIncentive(record, empId, date, pricing);
+    res.json({ date, ...incentive });
   } catch (err) { console.error(err); res.status(500).send("Server error"); }
 });
 

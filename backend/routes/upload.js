@@ -31,10 +31,10 @@ async function s3Upload(key, file) {
 }
 
 // ─── POST /upload ─────────────────────────────────────────────────────────────
-// photoType: selfie | towel | before | after | towel_soak | cancel
+// photoType: selfie | towel | towel_soak | duster_soak | before | after | cancel
 //
-// selfie / towel  → require employeeId, store in Attendance (no jobId needed)
-// everything else → require jobId
+// selfie / towel / towel_soak / duster_soak → require employeeId, store in Attendance
+// before / after / cancel                   → require jobId
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/', upload.single('image'), async (req, res) => {
   const file = req.file;
@@ -51,7 +51,6 @@ router.post('/', upload.single('image'), async (req, res) => {
     let url;
     try { url = await s3Upload(s3Key, file); }
     catch (err) { console.error("S3 error:", err); return res.status(500).send("Upload failed"); }
-
     try {
       await Attendance.findOneAndUpdate(
         { employeeId, date },
@@ -66,15 +65,12 @@ router.post('/', upload.single('image'), async (req, res) => {
   if (photoType === 'towel') {
     if (!employeeId) return res.status(400).send("employeeId required for towel");
     const date = today();
-
     const existing = await Attendance.findOne({ employeeId, date });
     const towelIndex = existing ? existing.towelUrls.length + 1 : 1;
     const s3Key = `attendance/${employeeId}/${date}/towel-${towelIndex}.jpg`;
-
     let url;
     try { url = await s3Upload(s3Key, file); }
     catch (err) { console.error("S3 error:", err); return res.status(500).send("Upload failed"); }
-
     try {
       await Attendance.findOneAndUpdate(
         { employeeId, date },
@@ -85,7 +81,43 @@ router.post('/', upload.single('image'), async (req, res) => {
     return res.json({ url });
   }
 
-  // ── ALL OTHER TYPES → require jobId ──────────────────────────────────────
+  // ── TOWEL SOAK → attendance ───────────────────────────────────────────────
+  if (photoType === 'towel_soak') {
+    if (!employeeId) return res.status(400).send("employeeId required for towel_soak");
+    const date  = today();
+    const s3Key = `attendance/${employeeId}/${date}/towel-soak.jpg`;
+    let url;
+    try { url = await s3Upload(s3Key, file); }
+    catch (err) { console.error("S3 error:", err); return res.status(500).send("Upload failed"); }
+    try {
+      await Attendance.findOneAndUpdate(
+        { employeeId, date },
+        { $set: { towelSoakUrl: url } },
+        { upsert: true, new: true }
+      );
+    } catch (err) { console.error("DB error:", err); }
+    return res.json({ url });
+  }
+
+  // ── DUSTER SOAK → attendance (Saturdays only) ─────────────────────────────
+  if (photoType === 'duster_soak') {
+    if (!employeeId) return res.status(400).send("employeeId required for duster_soak");
+    const date  = today();
+    const s3Key = `attendance/${employeeId}/${date}/duster-soak.jpg`;
+    let url;
+    try { url = await s3Upload(s3Key, file); }
+    catch (err) { console.error("S3 error:", err); return res.status(500).send("Upload failed"); }
+    try {
+      await Attendance.findOneAndUpdate(
+        { employeeId, date },
+        { $set: { dusterSoakUrl: url } },
+        { upsert: true, new: true }
+      );
+    } catch (err) { console.error("DB error:", err); }
+    return res.json({ url });
+  }
+
+  // ── JOB PHOTOS → require jobId ────────────────────────────────────────────
   if (!jobId) return res.status(400).send("jobId required");
 
   let s3Key;
@@ -94,8 +126,6 @@ router.post('/', upload.single('image'), async (req, res) => {
   } else if (photoType === 'after') {
     const safeLabel = (label || 'photo').toLowerCase().replace(/\s+/g, '-');
     s3Key = `jobs/${jobId}/after-${safeLabel}.jpg`;
-  } else if (photoType === 'towel_soak') {
-    s3Key = `jobs/${jobId}/towel-soak.jpg`;
   } else if (photoType === 'cancel') {
     s3Key = `jobs/${jobId}/cancel.jpg`;
   } else {
@@ -111,7 +141,7 @@ router.post('/', upload.single('image'), async (req, res) => {
     if (!job) return res.status(404).send("Job not found");
 
     if (photoType === 'before') {
-      job.images.before = s3Url;
+      job.images.before    = s3Url;
       job.beforeUploadedAt = new Date();
       if (employeeId) {
         await User.findByIdAndUpdate(employeeId, {
@@ -121,8 +151,6 @@ router.post('/', upload.single('image'), async (req, res) => {
     } else if (photoType === 'after') {
       const afterLabel = label || `Photo ${job.images.after.length + 1}`;
       job.images.after.push({ label: afterLabel, url: s3Url });
-    } else if (photoType === 'towel_soak') {
-      job.images.towelSoak = s3Url;
     } else if (photoType === 'cancel') {
       job.cancelPhotoUrl = s3Url;
     }
