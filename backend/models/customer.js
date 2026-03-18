@@ -13,6 +13,7 @@ const customerSchema = new mongoose.Schema({
   },
   serviceCount:  { type: Number, default: 0 },
   phone:         { type: String, default: '' },
+  carPhoto:      { type: String, default: null }, // S3 URL of car photo
   // Location for distance allowance calculation
   mapsLink:  { type: String, default: null }, // Google Maps link pasted by admin
   location: {

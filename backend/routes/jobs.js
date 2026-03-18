@@ -294,4 +294,139 @@ router.delete('/:id', async (req, res) => {
   }
 });
 
+// ── GET /jobs/my-complaints/:employeeId?month=&year= ─────────────────────────
+// Employee-facing — no auth required (employee uses their own ID)
+router.get('/my-complaints/:employeeId', async (req, res) => {
+  try {
+    const now   = new Date();
+    const month = parseInt(req.query.month) || (now.getMonth() + 1);
+    const year  = parseInt(req.query.year)  || now.getFullYear();
+    const from  = new Date(year, month - 1, 1);
+    const to    = new Date(year, month, 1);
+
+    const jobs = await Job.find({
+      employeeId:           req.params.employeeId,
+      'complaint.raised':   true,
+      'complaint.raisedAt': { $gte: from, $lt: to },
+    }).populate('customerId', 'customerName carType carModel vehicleNumber carPhoto')
+      .sort({ 'complaint.raisedAt': -1 });
+
+    const result = jobs.map(j => ({
+      jobId:        j._id,
+      assignedDate: j.assignedDate,
+      customerName: j.customerId?.customerName || '',
+      carType:      j.customerId?.carType      || '',
+      carModel:     j.customerId?.carModel     || '',
+      vehicleNo:    j.customerId?.vehicleNumber || '',
+      carPhoto:     j.customerId?.carPhoto     || null,
+      serviceType:  j.serviceType,
+      reason:       j.complaint.reason,
+      note:         j.complaint.note,
+      raisedAt:     j.complaint.raisedAt,
+      resolved:     j.complaint.resolved,
+      resolvedAt:   j.complaint.resolvedAt,
+    }));
+
+    res.json({
+      month, year,
+      total:    result.length,
+      resolved: result.filter(r => r.resolved).length,
+      complaints: result,
+    });
+  } catch (err) { console.error(err); res.status(500).send("Server error"); }
+});
+
+// ── GET /jobs/incentive-history/:employeeId?month=&year= ─────────────────────
+// Employee-facing — returns per-day incentive status for the month
+router.get('/incentive-history/:employeeId', async (req, res) => {
+  try {
+    const now   = new Date();
+    const month = parseInt(req.query.month) || (now.getMonth() + 1);
+    const year  = parseInt(req.query.year)  || now.getFullYear();
+
+    // Build date range as YYYY-MM-DD strings (IST)
+    const daysInMonth = new Date(year, month, 0).getDate();
+    const pad  = n => String(n).padLeft ? String(n).padStart(2, '0') : (n < 10 ? '0'+n : ''+n);
+    const dates = Array.from({ length: daysInMonth }, (_, i) =>
+      `${year}-${pad(month)}-${pad(i + 1)}`
+    );
+
+    const Attendance = require('../models/attendance');
+    const Config     = require('../models/config');
+    const configDoc  = await Config.findOne({ key: 'pricing' });
+    const pricing    = configDoc ? configDoc.value : { dailyIncentive: 100 };
+
+    // Fetch all attendance records for this employee this month
+    const records = await Attendance.find({
+      employeeId: req.params.employeeId,
+      date: { $gte: `${year}-${pad(month)}-01`,
+               $lte: `${year}-${pad(month)}-${pad(daysInMonth)}` },
+    });
+    const recordMap = {};
+    for (const r of records) recordMap[r.date] = r;
+
+    // Only compute for dates that have an attendance record
+    const days = [];
+    for (const date of dates) {
+      const record = recordMap[date];
+      if (!record) continue; // no attendance = no work = skip
+
+      // Inline incentive check (mirrors computeIncentive in admin.js)
+      const isSaturday = new Date(date + 'T00:00:00+05:30').getDay() === 6;
+      const reasons    = [];
+
+      if (record.incentiveExcused) {
+        days.push({ date, earned: true, excused: true,
+            amount: pricing.dailyIncentive ?? 100, reasons: [], isSaturday });
+        continue;
+      }
+
+      if (record.selfieApproval  !== 'approved') reasons.push('selfie');
+      if (record.towelsApproval  !== 'approved') reasons.push('towels');
+      if (!record.towelSoakUrl)                  reasons.push('towelSoakMissing');
+      else if (record.towelSoakApproval !== 'approved') reasons.push('towelSoak');
+      if (isSaturday) {
+        if (!record.dusterSoakUrl)               reasons.push('dusterSoakMissing');
+        else if (record.dusterSoakApproval !== 'approved') reasons.push('dusterSoak');
+      }
+
+      // Check first job before time
+      const firstJob = await Job.findOne({
+        employeeId:   req.params.employeeId,
+        assignedDate: date,
+      }).sort({ sortOrder: 1 });
+
+      if (firstJob?.beforeUploadedAt) {
+        const ist  = new Date(firstJob.beforeUploadedAt.getTime() + 5.5 * 60 * 60 * 1000);
+        const hhmm = ist.getHours() * 60 + ist.getMinutes();
+        if (hhmm > 6 * 60 + 15) reasons.push('late');
+      } else {
+        reasons.push('late');
+      }
+
+      const complainedJob = await Job.findOne({
+        employeeId:           req.params.employeeId,
+        assignedDate:         date,
+        'complaint.raised':   true,
+      });
+      if (complainedJob) reasons.push('complaint');
+
+      days.push({
+        date,
+        earned:     reasons.length === 0,
+        excused:    false,
+        amount:     reasons.length === 0 ? (pricing.dailyIncentive ?? 100) : 0,
+        reasons,
+        isSaturday,
+      });
+    }
+
+    const totalEarned = days.filter(d => d.earned).reduce((s, d) => s + d.amount, 0);
+    const earnedDays  = days.filter(d => d.earned).length;
+    const missedDays  = days.filter(d => !d.earned).length;
+
+    res.json({ month, year, totalEarned, earnedDays, missedDays, days });
+  } catch (err) { console.error(err); res.status(500).send("Server error"); }
+});
+
 module.exports = router;

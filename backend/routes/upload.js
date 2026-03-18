@@ -163,7 +163,25 @@ router.post('/', upload.single('image'), async (req, res) => {
   res.json({ url: s3Url });
 });
 
-// ─── POST /upload/employee-doc ────────────────────────────────────────────────
+// ─── POST /upload/customer-photo ─────────────────────────────────────────────
+router.post('/customer-photo', upload.single('image'), async (req, res) => {
+  const file = req.file;
+  if (!file) return res.status(400).send("No file provided");
+  const { customerId } = req.query;
+  if (!customerId) return res.status(400).send("customerId required");
+
+  const s3Key = `customers/${customerId}/car.jpg`;
+  let s3Url;
+  try { s3Url = await s3Upload(s3Key, file); }
+  catch (err) { console.error("S3 error:", err); return res.status(500).send("Upload failed"); }
+
+  try {
+    const Customer = require('../models/customer');
+    await Customer.findByIdAndUpdate(customerId, { carPhoto: s3Url });
+  } catch (err) { console.error("DB error:", err); }
+
+  res.json({ url: s3Url });
+});
 router.post('/employee-doc', upload.single('image'), async (req, res) => {
   const file = req.file;
   if (!file) return res.status(400).send("No file provided");
