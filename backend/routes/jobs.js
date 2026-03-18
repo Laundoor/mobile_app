@@ -12,15 +12,14 @@ function todayIST() {
   return ist.toISOString().split('T')[0];
 }
 
-// ── GET /jobs/employee/:employeeId — today's jobs for an employee ─────────────
+// ── GET /jobs/employee/:employeeId — jobs for an employee (default: today) ────
 router.get('/employee/:employeeId', async (req, res) => {
   try {
-    const today = todayIST();
+    const date = req.query.date || todayIST();
     const jobs  = await Job.find({
       employeeId:   req.params.employeeId,
-      assignedDate: today,
-    }).populate('customerId').sort({ sortOrder: 1 }); // employee sees jobs in planner order
-
+      assignedDate: date,
+    }).populate('customerId').sort({ sortOrder: 1 });
     res.json(jobs);
   } catch (err) {
     res.status(500).send("Server error");
@@ -292,6 +291,111 @@ router.delete('/:id', async (req, res) => {
   } catch (err) {
     res.status(500).send("Server error");
   }
+});
+
+// ── GET /jobs/my-salary/:employeeId?month=&year= ─────────────────────────────
+// Employee-facing salary: per-day earnings + car type breakdown, no customer names
+router.get('/my-salary/:employeeId', async (req, res) => {
+  try {
+    const now   = new Date();
+    const month = parseInt(req.query.month) || (now.getMonth() + 1);
+    const year  = parseInt(req.query.year)  || now.getFullYear();
+    const from  = new Date(year, month - 1, 1);
+    const to    = new Date(year, month, 1);
+
+    const Config    = require('../models/config');
+    const configDoc = await Config.findOne({ key: 'pricing' });
+    const pricing   = configDoc ? configDoc.value : {
+      exterior: { Hatchback: 20, Sedan: 25, SUV: 30 },
+      interiorStandard: 40, interiorPremium: 60,
+      distancePerKm: 2, dailyIncentive: 100,
+    };
+
+    const jobs = await Job.find({
+      employeeId:  req.params.employeeId,
+      status:      'Completed',
+      completedAt: { $gte: from, $lt: to },
+    }).populate('customerId', 'carType');
+
+    // Group by IST date
+    const byDate = {};
+    for (const job of jobs) {
+      const ist = new Date(job.completedAt.getTime() + 5.5 * 60 * 60 * 1000);
+      const dk  = ist.toISOString().split('T')[0];
+      if (!byDate[dk]) byDate[dk] = [];
+      byDate[dk].push(job);
+    }
+
+    // Attendance records for incentive check
+    const Attendance = require('../models/attendance');
+    const pad = n => String(n).padStart(2, '0');
+    const attRecords = await Attendance.find({
+      employeeId: req.params.employeeId,
+      date: {
+        $gte: `${year}-${pad(month)}-01`,
+        $lte: `${year}-${pad(month)}-${pad(new Date(year, month, 0).getDate())}`,
+      },
+    });
+    const attMap = {};
+    for (const r of attRecords) attMap[r.date] = r;
+
+    let totalEarnings  = 0;
+    let totalIncentive = 0;
+    const days = [];
+
+    for (const [date, dayJobs] of Object.entries(byDate).sort()) {
+      let dayEarnings = 0;
+      const counts = { Hatchback: 0, Sedan: 0, SUV: 0 };
+
+      for (const job of dayJobs) {
+        const carType = job.customerId?.carType || 'Hatchback';
+        const svcType = job.serviceType || '';
+        let   earn    = 0;
+        if (svcType === 'Exterior')
+          earn = pricing.exterior?.[carType] ?? 20;
+        else if (svcType === 'Interior Standard')
+          earn = pricing.interiorStandard ?? 40;
+        else if (svcType === 'Interior Premium')
+          earn = pricing.interiorPremium ?? 60;
+        dayEarnings += earn;
+        if (counts[carType] !== undefined) counts[carType]++;
+        else counts['Hatchback']++;
+      }
+
+      // Incentive for this day
+      const record = attMap[date];
+      let   incAmt = 0;
+      if (record) {
+        if (record.incentiveExcused) {
+          incAmt = pricing.dailyIncentive ?? 100;
+        } else {
+          const ok = record.selfieApproval  === 'approved' &&
+                     record.towelsApproval  === 'approved' &&
+                     record.towelSoakApproval === 'approved';
+          if (ok) incAmt = pricing.dailyIncentive ?? 100;
+        }
+      }
+
+      totalEarnings  += dayEarnings;
+      totalIncentive += incAmt;
+      days.push({
+        date,
+        jobCount:  dayJobs.length,
+        carCounts: counts,
+        earnings:  parseFloat(dayEarnings.toFixed(2)),
+        incentive: incAmt,
+        dayTotal:  parseFloat((dayEarnings + incAmt).toFixed(2)),
+      });
+    }
+
+    res.json({
+      month, year,
+      totalEarnings:  parseFloat(totalEarnings.toFixed(2)),
+      totalIncentive: parseFloat(totalIncentive.toFixed(2)),
+      grandTotal:     parseFloat((totalEarnings + totalIncentive).toFixed(2)),
+      days,
+    });
+  } catch (err) { console.error(err); res.status(500).send("Server error"); }
 });
 
 // ── GET /jobs/my-complaints/:employeeId?month=&year= ─────────────────────────

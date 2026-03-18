@@ -312,9 +312,19 @@ router.get('/customers/:id', adminAuth, async (req, res) => {
 router.get('/customers/:id/history', adminAuth, async (req, res) => {
   try {
     const jobs = await Job.find({ customerId: req.params.id })
-      .sort({ createdAt: -1 })
+      .sort({ assignedDate: -1 })
       .populate('employeeId', 'name email');
-    res.json(jobs);
+
+    // Compute this month's service count (completed, non-cancelled)
+    const now   = new Date();
+    const from  = new Date(now.getFullYear(), now.getMonth(), 1);
+    const to    = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const monthlyCount = jobs.filter(j =>
+      j.status === 'Completed' &&
+      j.completedAt && j.completedAt >= from && j.completedAt < to
+    ).length;
+
+    res.json({ jobs, monthlyCount });
   } catch (err) { res.status(500).send("Server error"); }
 });
 
