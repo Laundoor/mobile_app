@@ -12,6 +12,54 @@ function todayIST() {
   return ist.toISOString().split('T')[0];
 }
 
+// Haversine fallback
+function haversineKm(lat1, lng1, lat2, lng2) {
+  const R    = 6371;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLng = (lng2 - lng1) * Math.PI / 180;
+  const a    = Math.sin(dLat/2)**2 +
+               Math.cos(lat1*Math.PI/180) * Math.cos(lat2*Math.PI/180) *
+               Math.sin(dLng/2)**2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+}
+
+// Google Distance Matrix — one API call for whole day route (with haversine fallback)
+async function computeDayDistanceKm(points) {
+  if (points.length < 2) return 0;
+  const apiKey   = process.env.LOCATION_KEY;
+  const origins  = points.slice(0, -1);
+  const dests    = points.slice(1);
+
+  if (apiKey && origins.length <= 25) {
+    try {
+      const origStr = origins.map(p => `${p.lat},${p.lng}`).join('|');
+      const destStr = dests.map(p => `${p.lat},${p.lng}`).join('|');
+      const url = `https://maps.googleapis.com/maps/api/distancematrix/json` +
+                  `?origins=${origStr}&destinations=${destStr}` +
+                  `&mode=driving&units=metric&key=${apiKey}`;
+      const { data } = await axios.get(url, { timeout: 10000 });
+      if (data?.status === 'OK') {
+        let total = 0;
+        for (let i = 0; i < origins.length; i++) {
+          const el = data.rows?.[i]?.elements?.[i];
+          total += el?.status === 'OK'
+            ? el.distance.value / 1000
+            : haversineKm(origins[i].lat, origins[i].lng,
+                          dests[i].lat,   dests[i].lng);
+        }
+        return parseFloat(total.toFixed(2));
+      }
+    } catch (e) { /* fall through to haversine */ }
+  }
+
+  // Full haversine fallback
+  let total = 0;
+  for (let i = 0; i < origins.length; i++)
+    total += haversineKm(origins[i].lat, origins[i].lng,
+                         dests[i].lat,   dests[i].lng);
+  return parseFloat(total.toFixed(2));
+}
+
 // ── GET /jobs/employee/:employeeId — jobs for an employee (default: today) ────
 router.get('/employee/:employeeId', async (req, res) => {
   try {
@@ -294,7 +342,7 @@ router.delete('/:id', async (req, res) => {
 });
 
 // ── GET /jobs/my-salary/:employeeId?month=&year= ─────────────────────────────
-// Employee-facing salary: per-day earnings + car type breakdown, no customer names
+// Employee-facing salary: per-day earnings + car type breakdown + distance
 router.get('/my-salary/:employeeId', async (req, res) => {
   try {
     const now   = new Date();
@@ -311,16 +359,26 @@ router.get('/my-salary/:employeeId', async (req, res) => {
       distancePerKm: 2, dailyIncentive: 100,
     };
 
-    const jobs = await Job.find({
-      employeeId:  req.params.employeeId,
-      status:      'Completed',
-      completedAt: { $gte: from, $lt: to },
-    }).populate('customerId', 'carType');
+    // Fetch employee for home location
+    const emp = await User.findById(req.params.employeeId).select('homeLocation');
+    const home = emp?.homeLocation?.lat ? emp.homeLocation : null;
 
-    // Group by IST date
+    // Completed + cancelled jobs this month (need cancelled for distance)
+    const allJobs = await Job.find({
+      employeeId: req.params.employeeId,
+      status:     { $in: ['Completed', 'Cancelled'] },
+      $or: [
+        { completedAt: { $gte: from, $lt: to } },
+        { cancelledAt: { $gte: from, $lt: to } },
+      ],
+    }).populate('customerId', 'carType location mapsLink');
+
+    // Group by IST date using completedAt or cancelledAt
     const byDate = {};
-    for (const job of jobs) {
-      const ist = new Date(job.completedAt.getTime() + 5.5 * 60 * 60 * 1000);
+    for (const job of allJobs) {
+      const ts  = job.completedAt || job.cancelledAt;
+      if (!ts) continue;
+      const ist = new Date(ts.getTime() + 5.5 * 60 * 60 * 1000);
       const dk  = ist.toISOString().split('T')[0];
       if (!byDate[dk]) byDate[dk] = [];
       byDate[dk].push(job);
@@ -341,13 +399,16 @@ router.get('/my-salary/:employeeId', async (req, res) => {
 
     let totalEarnings  = 0;
     let totalIncentive = 0;
+    let totalDistanceKm= 0;
+    let totalDistanceEarnings = 0;
     const days = [];
 
     for (const [date, dayJobs] of Object.entries(byDate).sort()) {
+      const completedJobs = dayJobs.filter(j => j.status === 'Completed');
       let dayEarnings = 0;
       const counts = { Hatchback: 0, Sedan: 0, SUV: 0 };
 
-      for (const job of dayJobs) {
+      for (const job of completedJobs) {
         const carType = job.customerId?.carType || 'Hatchback';
         const svcType = job.serviceType || '';
         let   earn    = 0;
@@ -362,6 +423,25 @@ router.get('/my-salary/:employeeId', async (req, res) => {
         else counts['Hatchback']++;
       }
 
+      // Distance for the day (all jobs sorted by sortOrder)
+      let dayKm = 0;
+      let dayDistEarnings = 0;
+      if (home) {
+        const sortedJobs = dayJobs
+          .filter(j => j.customerId?.location?.lat)
+          .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+        if (sortedJobs.length > 0) {
+          const waypoints   = sortedJobs.map(j => ({
+            lat: j.customerId.location.lat,
+            lng: j.customerId.location.lng,
+          }));
+          const routePoints = [home, ...waypoints, home];
+          dayKm = await computeDayDistanceKm(routePoints);
+          dayDistEarnings = parseFloat(
+              (dayKm * (pricing.distancePerKm ?? 2)).toFixed(2));
+        }
+      }
+
       // Incentive for this day
       const record = attMap[date];
       let   incAmt = 0;
@@ -369,30 +449,40 @@ router.get('/my-salary/:employeeId', async (req, res) => {
         if (record.incentiveExcused) {
           incAmt = pricing.dailyIncentive ?? 100;
         } else {
-          const ok = record.selfieApproval  === 'approved' &&
-                     record.towelsApproval  === 'approved' &&
+          const ok = record.selfieApproval    === 'approved' &&
+                     record.towelsApproval    === 'approved' &&
                      record.towelSoakApproval === 'approved';
           if (ok) incAmt = pricing.dailyIncentive ?? 100;
         }
       }
 
-      totalEarnings  += dayEarnings;
-      totalIncentive += incAmt;
+      totalEarnings         += dayEarnings;
+      totalIncentive        += incAmt;
+      totalDistanceKm       += dayKm;
+      totalDistanceEarnings += dayDistEarnings;
+
       days.push({
         date,
-        jobCount:  dayJobs.length,
-        carCounts: counts,
-        earnings:  parseFloat(dayEarnings.toFixed(2)),
-        incentive: incAmt,
-        dayTotal:  parseFloat((dayEarnings + incAmt).toFixed(2)),
+        jobCount:      completedJobs.length,
+        carCounts:     counts,
+        earnings:      parseFloat(dayEarnings.toFixed(2)),
+        distanceKm:    parseFloat(dayKm.toFixed(2)),
+        distanceEarnings: dayDistEarnings,
+        incentive:     incAmt,
+        dayTotal:      parseFloat(
+            (dayEarnings + dayDistEarnings + incAmt).toFixed(2)),
       });
     }
 
     res.json({
       month, year,
-      totalEarnings:  parseFloat(totalEarnings.toFixed(2)),
-      totalIncentive: parseFloat(totalIncentive.toFixed(2)),
-      grandTotal:     parseFloat((totalEarnings + totalIncentive).toFixed(2)),
+      totalEarnings:         parseFloat(totalEarnings.toFixed(2)),
+      totalDistanceKm:       parseFloat(totalDistanceKm.toFixed(2)),
+      totalDistanceEarnings: parseFloat(totalDistanceEarnings.toFixed(2)),
+      totalIncentive:        parseFloat(totalIncentive.toFixed(2)),
+      grandTotal:            parseFloat(
+          (totalEarnings + totalDistanceEarnings + totalIncentive).toFixed(2)),
+      hasHomeLocation: !!home,
       days,
     });
   } catch (err) { console.error(err); res.status(500).send("Server error"); }
