@@ -66,6 +66,12 @@ router.post('/', upload.single('image'), async (req, res) => {
     if (!employeeId) return res.status(400).send("employeeId required for towel");
     const date = today();
     const existing = await Attendance.findOne({ employeeId, date });
+
+    // Hard limit: max 6 towels per day
+    if (existing && existing.towelUrls.length >= 6) {
+      return res.status(400).send("Maximum 6 towel photos already uploaded for today");
+    }
+
     const towelIndex = existing ? existing.towelUrls.length + 1 : 1;
     const s3Key = `attendance/${employeeId}/${date}/towel-${towelIndex}.jpg`;
     let url;
