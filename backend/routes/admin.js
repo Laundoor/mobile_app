@@ -769,11 +769,12 @@ async function computeIncentive(record, employeeId, date, pricing) {
     reasons.push('late'); // no before photo at all
   }
 
-  // 6. No complaints raised that day
+  // 6. No unresolved complaints raised that day
   const complainedJob = await Job.findOne({
     employeeId,
     assignedDate: date,
-    'complaint.raised': true,
+    'complaint.raised':    true,
+    'complaint.resolved':  { $ne: true }, // resolved complaints don't affect incentive
   });
   if (complainedJob) reasons.push('complaint');
 
