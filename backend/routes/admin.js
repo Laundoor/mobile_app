@@ -369,7 +369,7 @@ router.post('/assign', adminAuth, async (req, res) => {
       const attRecord  = await Attendance.findOne({
         employeeId, date: today });
       if (attRecord?.towelSoakUrl) {
-        const isSat = new Date(today + 'T00:00:00+05:30').getDay() === 6;
+        const isSat = new Date(today + 'T12:00:00Z').getUTCDay() === 6;
         // On Saturday, also need duster soak to be fully done
         const dayDone = isSat
           ? (attRecord.towelSoakUrl && attRecord.dusterSoakUrl)
@@ -501,15 +501,30 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
     }
 
     const jobDetails    = [];
+    const dayDetails    = {}; // keyed by date — per-day aggregates
     const carTypeCounts = { Hatchback: 0, Sedan: 0, SUV: 0 };
     let totalJobEarnings       = 0;
     let totalDistanceKm        = 0;
     let totalDistanceEarnings  = 0;
-    let totalSkippedCustomers  = 0; // customers with no coords — excluded from distance
+    let totalSkippedCustomers  = 0;
 
     const home = employee.homeLocation?.lat ? employee.homeLocation : null;
 
     for (const [date, dayJobs] of Object.entries(byDate).sort()) {
+      // Initialise per-day bucket
+      dayDetails[date] = {
+        date,
+        jobCount:         0,
+        carCounts:        { Hatchback: 0, Sedan: 0, SUV: 0 },
+        jobEarnings:      0,
+        distanceKm:       0,
+        distanceEarnings: 0,
+        incentive:        0,        // filled later from attendance
+        incentiveEarned:  false,
+        incentiveReasons: [],
+        dayTotal:         0,
+      };
+
       for (const job of dayJobs) {
         const customer  = job.customerId;
         const carType   = customer?.carType || 'Hatchback';
@@ -525,7 +540,13 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
             earnings = pricing.interiorPremium ?? 60;
           }
           if (carTypeCounts[carType] !== undefined) carTypeCounts[carType]++;
+          else carTypeCounts['Hatchback']++;
           totalJobEarnings += earnings;
+          dayDetails[date].jobEarnings += earnings;
+          dayDetails[date].jobCount++;
+          if (dayDetails[date].carCounts[carType] !== undefined)
+            dayDetails[date].carCounts[carType]++;
+          else dayDetails[date].carCounts['Hatchback']++;
         }
         jobDetails.push({
           jobId:         job._id,
@@ -551,7 +572,7 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         });
       }
 
-      // Daily distance — sort by sortOrder, include cancelled jobs
+      // Daily distance
       if (home) {
         const eligibleJobs = dayJobs
           .filter(job => {
@@ -575,16 +596,17 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
             waypoints.push(coords);
           } else {
             skipped++;
-            console.warn(`[salary] No coords for customer: ${customer?.customerName} (${customer?._id})`);
           }
         }
 
         if (waypoints.length > 0) {
-          // Build full route: home → C1 → C2 → ... → Cn → home
           const routePoints = [home, ...waypoints, home];
           const dayKm = await computeDayDistanceKm(routePoints);
+          const dayDistEarn = parseFloat((dayKm * (pricing.distancePerKm ?? 2)).toFixed(2));
           totalDistanceKm       += dayKm;
-          totalDistanceEarnings += dayKm * (pricing.distancePerKm ?? 2);
+          totalDistanceEarnings += dayDistEarn;
+          dayDetails[date].distanceKm       = parseFloat(dayKm.toFixed(2));
+          dayDetails[date].distanceEarnings = dayDistEarn;
           if (skipped > 0) totalSkippedCustomers += skipped;
         }
       }
@@ -611,6 +633,18 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         amount:   inc.amount,
         reasons:  inc.reasons,
       });
+      // Merge into dayDetails if that day had jobs
+      if (dayDetails[record.date]) {
+        dayDetails[record.date].incentive        = inc.earned ? inc.amount : 0;
+        dayDetails[record.date].incentiveEarned  = inc.earned;
+        dayDetails[record.date].incentiveReasons = inc.reasons;
+      }
+    }
+
+    // Compute dayTotal for each day
+    for (const d of Object.values(dayDetails)) {
+      d.dayTotal = parseFloat(
+        (d.jobEarnings + d.distanceEarnings + d.incentive).toFixed(2));
     }
 
     res.json({
@@ -630,6 +664,7 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         skippedCustomers:     totalSkippedCustomers,
       },
       jobDetails,
+      dayDetails: Object.values(dayDetails).sort((a, b) => a.date.localeCompare(b.date)),
       incentiveDetails,
     });
   } catch (err) {
@@ -754,7 +789,7 @@ router.post('/seed', async (req, res) => {
 // Returns { earned: bool, reasons: string[] }
 async function computeIncentive(record, employeeId, date, pricing) {
   const incentiveAmt  = pricing.dailyIncentive ?? 100;
-  const isSaturday    = new Date(date + 'T00:00:00+05:30').getDay() === 6;
+  const isSaturday    = new Date(date + 'T12:00:00Z').getUTCDay() === 6;
   const reasons       = [];
 
   if (!record) return { earned: false, amount: 0, reasons: ['No attendance record for this day'] };
@@ -787,7 +822,15 @@ async function computeIncentive(record, employeeId, date, pricing) {
     reasons.push('late'); // no before photo at all
   }
 
-  // 6. No unresolved complaints raised that day
+  // 6. Minimum 5 completed cars for the day
+  const completedCount = await Job.countDocuments({
+    employeeId,
+    assignedDate: date,
+    status: 'Completed',
+  });
+  if (completedCount < 5) reasons.push('minCars');
+
+  // 7. No unresolved complaints raised that day
   const complainedJob = await Job.findOne({
     employeeId,
     assignedDate: date,

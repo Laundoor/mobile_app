@@ -566,7 +566,7 @@ router.get('/incentive-history/:employeeId', async (req, res) => {
       if (!record) continue; // no attendance = no work = skip
 
       // Inline incentive check (mirrors computeIncentive in admin.js)
-      const isSaturday = new Date(date + 'T00:00:00+05:30').getDay() === 6;
+      const isSaturday = new Date(date + 'T12:00:00Z').getUTCDay() === 6;
       const reasons    = [];
 
       if (record.incentiveExcused) {
