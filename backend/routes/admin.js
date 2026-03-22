@@ -362,6 +362,24 @@ router.post('/assign', adminAuth, async (req, res) => {
     });
     if (existing) return res.status(400).send("Customer already assigned today");
 
+    // Block assignment if employee has already completed towel soak for today
+    // (means their day is done — no new jobs should be added)
+    if (today === todayIST()) {
+      const Attendance = require('../models/attendance');
+      const attRecord  = await Attendance.findOne({
+        employeeId, date: today });
+      if (attRecord?.towelSoakUrl) {
+        const isSat = new Date(today + 'T00:00:00+05:30').getDay() === 6;
+        // On Saturday, also need duster soak to be fully done
+        const dayDone = isSat
+          ? (attRecord.towelSoakUrl && attRecord.dusterSoakUrl)
+          : true;
+        if (dayDone)
+          return res.status(400).send(
+            "Employee has already completed their day (towel soak uploaded). Cannot assign new jobs.");
+      }
+    }
+
     // sortOrder = next in line for this employee on this date
     const lastJob = await Job.findOne({ employeeId, assignedDate: today })
       .sort({ sortOrder: -1 });
