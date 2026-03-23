@@ -894,7 +894,12 @@ router.get('/attendance/:employeeId', adminAuth, async (req, res) => {
     const pricing   = configDoc ? configDoc.value : DEFAULT_PRICING;
 
     const response = record
-      ? record.toObject()
+      ? {
+          ...record.toObject(),
+          // selfieUploadedAt may be null for records created before this field was added
+          // fall back to createdAt (time attendance record was first created = selfie upload time)
+          selfieUploadedAt: record.selfieUploadedAt || record.createdAt || null,
+        }
       : { selfieUrl: null, towelUrls: [], date,
           selfieApproval: 'pending', towelsApproval: 'pending',
           towelSoakApproval: 'pending', dusterSoakApproval: 'pending',
