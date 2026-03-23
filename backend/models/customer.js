@@ -11,6 +11,11 @@ const customerSchema = new mongoose.Schema({
     enum: ['Hatchback', 'Sedan', 'SUV'],
     default: 'Hatchback'
   },
+  interiorType: {
+    type: String,
+    enum: ['None', 'Interior Standard', 'Interior Premium'],
+    default: 'None'
+  },
   serviceCount:  { type: Number, default: 0 },
   phone:         { type: String, default: '' },
   carPhoto:      { type: String, default: null }, // S3 URL of car photo

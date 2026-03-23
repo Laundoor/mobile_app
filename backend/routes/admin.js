@@ -874,6 +874,7 @@ router.get('/attendance/my-status/:employeeId', async (req, res) => {
     res.json({
       exists:           true,
       selfieUrl:        record.selfieUrl        || null,
+      selfieUploadedAt: record.selfieUploadedAt || record.createdAt || null,
       towelUrls:        record.towelUrls        || [],
       towelSoakUrl:     record.towelSoakUrl     || null,
       dusterSoakUrl:    record.dusterSoakUrl    || null,
@@ -962,7 +963,16 @@ router.get('/attendance/:employeeId/incentive-status', async (req, res) => {
     const pricing   = configDoc ? configDoc.value : DEFAULT_PRICING;
 
     const incentive = await computeIncentive(record, empId, date, pricing);
-    res.json({ date, ...incentive });
+
+    // Include login time (selfieUploadedAt) for employee display
+    let loginTime = null;
+    if (record?.selfieUploadedAt || record?.createdAt) {
+      const raw = record.selfieUploadedAt || record.createdAt;
+      const ist = new Date(new Date(raw).getTime() + 5.5 * 60 * 60 * 1000);
+      loginTime = `${String(ist.getUTCHours()).padStart(2,'0')}:${String(ist.getUTCMinutes()).padStart(2,'0')}`;
+    }
+
+    res.json({ date, ...incentive, loginTime });
   } catch (err) { console.error(err); res.status(500).send("Server error"); }
 });
 

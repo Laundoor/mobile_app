@@ -3,7 +3,8 @@ const mongoose = require('mongoose');
 const attendanceSchema = new mongoose.Schema({
   employeeId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   date:       { type: String, required: true }, // "YYYY-MM-DD"
-  selfieUrl:  { type: String, default: null },
+  selfieUrl:        { type: String, default: null },
+  selfieUploadedAt: { type: Date,   default: null }, // explicit login time
   towelUrls:  { type: [String], default: [] },
 
   // Soak photos (moved from Job)

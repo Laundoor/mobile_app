@@ -54,7 +54,7 @@ router.post('/', upload.single('image'), async (req, res) => {
     try {
       await Attendance.findOneAndUpdate(
         { employeeId, date },
-        { $set: { selfieUrl: url } },
+        { $set: { selfieUrl: url, selfieUploadedAt: new Date() } },
         { upsert: true, new: true }
       );
     } catch (err) { console.error("DB error:", err); }
