@@ -510,8 +510,10 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
 
     const home = employee.homeLocation?.lat ? employee.homeLocation : null;
 
+    // ── Pass 1: sync — compute earnings, build jobDetails, collect waypoints ──
+    const distanceTasks = []; // { date, routePoints } — fired in parallel later
+
     for (const [date, dayJobs] of Object.entries(byDate).sort()) {
-      // Initialise per-day bucket
       dayDetails[date] = {
         date,
         jobCount:         0,
@@ -519,7 +521,7 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         jobEarnings:      0,
         distanceKm:       0,
         distanceEarnings: 0,
-        incentive:        0,        // filled later from attendance
+        incentive:        0,
         incentiveEarned:  false,
         incentiveReasons: [],
         dayTotal:         0,
@@ -572,7 +574,7 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         });
       }
 
-      // Daily distance
+      // Collect waypoints for this day (extractLatLng is fast — uses cached coords)
       if (home) {
         const eligibleJobs = dayJobs
           .filter(job => {
@@ -592,23 +594,32 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
           } else if (customer?.mapsLink) {
             coords = await extractLatLng(customer.mapsLink);
           }
-          if (coords) {
-            waypoints.push(coords);
-          } else {
-            skipped++;
-          }
+          if (coords) waypoints.push(coords);
+          else skipped++;
         }
 
         if (waypoints.length > 0) {
-          const routePoints = [home, ...waypoints, home];
-          const dayKm = await computeDayDistanceKm(routePoints);
-          const dayDistEarn = parseFloat((dayKm * (pricing.distancePerKm ?? 2)).toFixed(2));
-          totalDistanceKm       += dayKm;
-          totalDistanceEarnings += dayDistEarn;
-          dayDetails[date].distanceKm       = parseFloat(dayKm.toFixed(2));
-          dayDetails[date].distanceEarnings = dayDistEarn;
-          if (skipped > 0) totalSkippedCustomers += skipped;
+          distanceTasks.push({ date, routePoints: [home, ...waypoints, home], skipped });
         }
+      }
+    }
+
+    // ── Pass 2: fire ALL distance API calls in parallel ───────────────────────
+    if (distanceTasks.length > 0) {
+      const distResults = await Promise.all(
+        distanceTasks.map(({ date, routePoints, skipped }) =>
+          computeDayDistanceKm(routePoints).then(dayKm => ({
+            date, dayKm, skipped,
+            dayDistEarn: parseFloat((dayKm * (pricing.distancePerKm ?? 2)).toFixed(2)),
+          }))
+        )
+      );
+      for (const { date, dayKm, skipped, dayDistEarn } of distResults) {
+        totalDistanceKm       += dayKm;
+        totalDistanceEarnings += dayDistEarn;
+        dayDetails[date].distanceKm       = parseFloat(dayKm.toFixed(2));
+        dayDetails[date].distanceEarnings = dayDistEarn;
+        if (skipped > 0) totalSkippedCustomers += skipped;
       }
     }
 
@@ -621,10 +632,16 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
       date: { $gte: from.toISOString().split('T')[0], $lte: to.toISOString().split('T')[0] },
     });
 
+    // ── Pass 3: compute incentive for all days in parallel ────────────────────
     let totalIncentive = 0;
     const incentiveDetails = [];
-    for (const record of attendanceRecords) {
-      const inc = await computeIncentive(record, employeeId, record.date, pricing);
+    const incResults = await Promise.all(
+      attendanceRecords.map(record =>
+        computeIncentive(record, employeeId, record.date, pricing)
+          .then(inc => ({ record, inc }))
+      )
+    );
+    for (const { record, inc } of incResults) {
       if (inc.earned) totalIncentive += inc.amount;
       incentiveDetails.push({
         date:     record.date,
@@ -633,7 +650,6 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         amount:   inc.amount,
         reasons:  inc.reasons,
       });
-      // Merge into dayDetails if that day had jobs
       if (dayDetails[record.date]) {
         dayDetails[record.date].incentive        = inc.earned ? inc.amount : 0;
         dayDetails[record.date].incentiveEarned  = inc.earned;
@@ -846,6 +862,24 @@ async function computeIncentive(record, employeeId, date, pricing) {
     isSaturday,
   };
 }
+
+// GET /attendance/my-status/:employeeId?date= — employee-facing, no auth
+// Returns just the fields the employee app needs (no sensitive admin data)
+router.get('/attendance/my-status/:employeeId', async (req, res) => {
+  try {
+    const date   = req.query.date || todayIST();
+    const record = await Attendance.findOne({
+      employeeId: req.params.employeeId, date });
+    if (!record) return res.json({ exists: false });
+    res.json({
+      exists:           true,
+      selfieUrl:        record.selfieUrl        || null,
+      towelUrls:        record.towelUrls        || [],
+      towelSoakUrl:     record.towelSoakUrl     || null,
+      dusterSoakUrl:    record.dusterSoakUrl    || null,
+    });
+  } catch (err) { res.status(500).send("Server error"); }
+});
 
 // GET /admin/attendance/:employeeId?date=YYYY-MM-DD
 router.get('/attendance/:employeeId', adminAuth, async (req, res) => {

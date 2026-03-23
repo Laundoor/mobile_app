@@ -403,15 +403,17 @@ router.get('/my-salary/:employeeId', async (req, res) => {
     let totalDistanceEarnings = 0;
     const days = [];
 
-    for (const [date, dayJobs] of Object.entries(byDate).sort()) {
+    const sortedDates = Object.entries(byDate).sort();
+
+    // ── Step 1: compute job earnings + car counts synchronously (no I/O) ──────
+    const dayData = sortedDates.map(([date, dayJobs]) => {
       const completedJobs = dayJobs.filter(j => j.status === 'Completed');
       let dayEarnings = 0;
       const counts = { Hatchback: 0, Sedan: 0, SUV: 0 };
-
       for (const job of completedJobs) {
         const carType = job.customerId?.carType || 'Hatchback';
         const svcType = job.serviceType || '';
-        let   earn    = 0;
+        let earn = 0;
         if (svcType === 'Exterior')
           earn = pricing.exterior?.[carType] ?? 20;
         else if (svcType === 'Interior Standard')
@@ -423,28 +425,44 @@ router.get('/my-salary/:employeeId', async (req, res) => {
         else counts['Hatchback']++;
       }
 
-      // Distance for the day (all jobs sorted by sortOrder)
-      let dayKm = 0;
-      let dayDistEarnings = 0;
+      // Build route points for distance call
+      let routePoints = null;
       if (home) {
-        const sortedJobs = dayJobs
+        const sorted = dayJobs
           .filter(j => j.customerId?.location?.lat)
           .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-        if (sortedJobs.length > 0) {
-          const waypoints   = sortedJobs.map(j => ({
+        if (sorted.length > 0) {
+          const waypoints = sorted.map(j => ({
             lat: j.customerId.location.lat,
             lng: j.customerId.location.lng,
           }));
-          const routePoints = [home, ...waypoints, home];
-          dayKm = await computeDayDistanceKm(routePoints);
-          dayDistEarnings = parseFloat(
-              (dayKm * (pricing.distancePerKm ?? 2)).toFixed(2));
+          routePoints = [home, ...waypoints, home];
         }
       }
 
+      return { date, dayJobs, completedJobs, dayEarnings, counts, routePoints };
+    });
+
+    // ── Step 2: fire ALL distance API calls in parallel ──────────────────────
+    // 26 sequential awaits → 26 concurrent requests → total time ≈ slowest single call
+    const distanceResults = await Promise.all(
+      dayData.map(d =>
+        d.routePoints
+          ? computeDayDistanceKm(d.routePoints)
+          : Promise.resolve(0)
+      )
+    );
+
+    // ── Step 3: assemble final response ─────────────────────────────────────
+    for (let i = 0; i < dayData.length; i++) {
+      const { date, completedJobs, dayEarnings, counts } = dayData[i];
+      const dayKm = distanceResults[i];
+      const dayDistEarnings = parseFloat(
+          (dayKm * (pricing.distancePerKm ?? 2)).toFixed(2));
+
       // Incentive for this day
       const record = attMap[date];
-      let   incAmt = 0;
+      let incAmt = 0;
       if (record) {
         if (record.incentiveExcused) {
           incAmt = pricing.dailyIncentive ?? 100;
@@ -463,13 +481,13 @@ router.get('/my-salary/:employeeId', async (req, res) => {
 
       days.push({
         date,
-        jobCount:      completedJobs.length,
-        carCounts:     counts,
-        earnings:      parseFloat(dayEarnings.toFixed(2)),
-        distanceKm:    parseFloat(dayKm.toFixed(2)),
+        jobCount:         completedJobs.length,
+        carCounts:        counts,
+        earnings:         parseFloat(dayEarnings.toFixed(2)),
+        distanceKm:       parseFloat(dayKm.toFixed(2)),
         distanceEarnings: dayDistEarnings,
-        incentive:     incAmt,
-        dayTotal:      parseFloat(
+        incentive:        incAmt,
+        dayTotal:         parseFloat(
             (dayEarnings + dayDistEarnings + incAmt).toFixed(2)),
       });
     }
