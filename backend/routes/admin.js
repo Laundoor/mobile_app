@@ -972,9 +972,13 @@ router.get('/attendance/:employeeId/incentive-status', async (req, res) => {
     // Include login time (selfieUploadedAt) for employee display
     let loginTime = null;
     if (record?.selfieUploadedAt || record?.createdAt) {
-      const raw = record.selfieUploadedAt || record.createdAt;
-      const ist = new Date(new Date(raw).getTime() + 5.5 * 60 * 60 * 1000);
-      loginTime = `${String(ist.getUTCHours()).padStart(2,'0')}:${String(ist.getUTCMinutes()).padStart(2,'0')}`;
+      const raw  = record.selfieUploadedAt || record.createdAt;
+      const ist  = new Date(new Date(raw).getTime() + 5.5 * 60 * 60 * 1000);
+      const h24  = ist.getUTCHours();
+      const h12  = h24 === 0 ? 12 : h24 > 12 ? h24 - 12 : h24;
+      const ampm = h24 < 12 ? 'AM' : 'PM';
+      const mm   = String(ist.getUTCMinutes()).padStart(2, '0');
+      loginTime  = `${h12}:${mm} ${ampm}`;
     }
 
     res.json({ date, ...incentive, loginTime });
