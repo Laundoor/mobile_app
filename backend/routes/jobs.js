@@ -12,6 +12,12 @@ function todayIST() {
   return ist.toISOString().split('T')[0];
 }
 
+// Half-down rounding: rounds up only if fraction is strictly > 0.5
+// e.g. 28.5 → 28, 28.51 → 29
+function halfDownRound(value) {
+  return Math.ceil(value - 0.5);
+}
+
 // Haversine fallback
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R    = 6371;
@@ -468,8 +474,8 @@ router.get('/my-salary/:employeeId', async (req, res) => {
     for (let i = 0; i < dayData.length; i++) {
       const { date, completedJobs, dayEarnings, counts } = dayData[i];
       const dayKm = distanceResults[i];
-      const dayDistEarnings = parseFloat(
-          (dayKm * (pricing.distancePerKm ?? 2)).toFixed(2));
+      const dayDistEarnings = halfDownRound(
+          dayKm * (pricing.distancePerKm ?? 2));
 
       // Incentive for this day
       const record = attMap[date];
@@ -494,23 +500,21 @@ router.get('/my-salary/:employeeId', async (req, res) => {
         date,
         jobCount:         completedJobs.filter(isPayable).length,
         carCounts:        counts,
-        earnings:         parseFloat(dayEarnings.toFixed(2)),
+        earnings:         dayEarnings,
         distanceKm:       parseFloat(dayKm.toFixed(2)),
         distanceEarnings: dayDistEarnings,
         incentive:        incAmt,
-        dayTotal:         parseFloat(
-            (dayEarnings + dayDistEarnings + incAmt).toFixed(2)),
+        dayTotal:         halfDownRound(dayEarnings + dayDistEarnings + incAmt),
       });
     }
 
     res.json({
       month, year,
-      totalEarnings:         parseFloat(totalEarnings.toFixed(2)),
+      totalEarnings:         totalEarnings,
       totalDistanceKm:       parseFloat(totalDistanceKm.toFixed(2)),
-      totalDistanceEarnings: parseFloat(totalDistanceEarnings.toFixed(2)),
-      totalIncentive:        parseFloat(totalIncentive.toFixed(2)),
-      grandTotal:            parseFloat(
-          (totalEarnings + totalDistanceEarnings + totalIncentive).toFixed(2)),
+      totalDistanceEarnings: halfDownRound(totalDistanceEarnings),
+      totalIncentive:        totalIncentive,
+      grandTotal:            halfDownRound(totalEarnings + totalDistanceEarnings + totalIncentive),
       hasHomeLocation: !!home,
       days,
     });

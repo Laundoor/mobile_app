@@ -16,6 +16,12 @@ function todayIST() {
   return ist.toISOString().split('T')[0];
 }
 
+// Half-down rounding: rounds up only if fraction is strictly > 0.5
+// e.g. 28.5 → 28, 28.51 → 29, 28.4 → 28, 28.9 → 29
+function halfDownRound(value) {
+  return Math.ceil(value - 0.5);
+}
+
 // ── MIDDLEWARE ────────────────────────────────────────────────────────────────
 function adminAuth(req, res, next) {
   const header = req.headers['authorization'];
@@ -626,7 +632,7 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         distanceTasks.map(({ date, routePoints, skipped }) =>
           computeDayDistanceKm(routePoints).then(dayKm => ({
             date, dayKm, skipped,
-            dayDistEarn: parseFloat((dayKm * (pricing.distancePerKm ?? 2)).toFixed(2)),
+            dayDistEarn: halfDownRound(dayKm * (pricing.distancePerKm ?? 2)),
           }))
         )
       );
@@ -675,8 +681,8 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
 
     // Compute dayTotal for each day
     for (const d of Object.values(dayDetails)) {
-      d.dayTotal = parseFloat(
-        (d.jobEarnings + d.distanceEarnings + d.incentive).toFixed(2));
+      d.dayTotal = halfDownRound(
+        d.jobEarnings + d.distanceEarnings + d.incentive);
     }
 
     res.json({
@@ -688,11 +694,11 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         complainedJobs:       complainedJobs.length,
         resolvedComplaints:   resolvedJobs.length,
         carTypeCounts,
-        totalJobEarnings:     parseFloat(totalJobEarnings.toFixed(2)),
+        totalJobEarnings:     halfDownRound(totalJobEarnings),
         totalDistanceKm:      parseFloat(totalDistanceKm.toFixed(2)),
-        totalDistanceEarnings:parseFloat(totalDistanceEarnings.toFixed(2)),
-        totalIncentive:       parseFloat(totalIncentive.toFixed(2)),
-        grandTotal:           parseFloat((totalJobEarnings + totalDistanceEarnings + totalIncentive).toFixed(2)),
+        totalDistanceEarnings:halfDownRound(totalDistanceEarnings),
+        totalIncentive:       halfDownRound(totalIncentive),
+        grandTotal:           halfDownRound(totalJobEarnings + totalDistanceEarnings + totalIncentive),
         skippedCustomers:     totalSkippedCustomers,
       },
       jobDetails,
