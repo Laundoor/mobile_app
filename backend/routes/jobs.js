@@ -405,12 +405,18 @@ router.get('/my-salary/:employeeId', async (req, res) => {
 
     const sortedDates = Object.entries(byDate).sort();
 
+    // Same rule as admin salary: unresolved complaints = not payable
+    const isPayable = (job) =>
+      !job.complaint?.raised || job.complaint?.resolved === true;
+
     // ── Step 1: compute job earnings + car counts synchronously (no I/O) ──────
     const dayData = sortedDates.map(([date, dayJobs]) => {
       const completedJobs = dayJobs.filter(j => j.status === 'Completed');
       let dayEarnings = 0;
       const counts = { Hatchback: 0, Sedan: 0, SUV: 0 };
       for (const job of completedJobs) {
+        // Skip jobs with unresolved complaints — same logic as admin salary
+        if (!isPayable(job)) continue;
         const carType = job.customerId?.carType || 'Hatchback';
         const svcType = job.serviceType || '';
         let earn = 0;
@@ -425,10 +431,15 @@ router.get('/my-salary/:employeeId', async (req, res) => {
         else counts['Hatchback']++;
       }
 
-      // Build route points for distance call
+      // Build route points — match admin logic:
+      // payable completed jobs + cancelled jobs count for distance
       let routePoints = null;
       if (home) {
         const sorted = dayJobs
+          .filter(j => {
+            return (j.status === 'Completed' && isPayable(j)) ||
+                    j.status === 'Cancelled';
+          })
           .filter(j => j.customerId?.location?.lat)
           .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
         if (sorted.length > 0) {
@@ -481,7 +492,7 @@ router.get('/my-salary/:employeeId', async (req, res) => {
 
       days.push({
         date,
-        jobCount:         completedJobs.length,
+        jobCount:         completedJobs.filter(isPayable).length,
         carCounts:        counts,
         earnings:         parseFloat(dayEarnings.toFixed(2)),
         distanceKm:       parseFloat(dayKm.toFixed(2)),
