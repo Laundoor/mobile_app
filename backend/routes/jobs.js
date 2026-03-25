@@ -12,10 +12,63 @@ function todayIST() {
   return ist.toISOString().split('T')[0];
 }
 
+// Full incentive computation — mirrors computeIncentive() in admin.js exactly
+// Must stay in sync with admin.js whenever criteria change
+async function computeIncentiveFull(record, employeeId, date, pricing) {
+  const incentiveAmt = pricing.dailyIncentive ?? 100;
+  const isSaturday   = new Date(date + 'T12:00:00Z').getUTCDay() === 6;
+  const reasons      = [];
+
+  if (!record)
+    return { earned: false, amount: 0, isSaturday, reasons: ['No attendance record'] };
+  if (record.incentiveExcused)
+    return { earned: true, excused: true, amount: incentiveAmt, isSaturday, reasons: [] };
+
+  if (record.selfieApproval  !== 'approved') reasons.push('selfie');
+  if (record.towelsApproval  !== 'approved') reasons.push('towels');
+  if (!record.towelSoakUrl)                  reasons.push('towelSoakMissing');
+  else if (record.towelSoakApproval !== 'approved') reasons.push('towelSoak');
+  if (isSaturday) {
+    if (!record.dusterSoakUrl)               reasons.push('dusterSoakMissing');
+    else if (record.dusterSoakApproval !== 'approved') reasons.push('dusterSoak');
+  }
+
+  // Before photo of first job on or before 06:15 IST
+  const firstJob = await Job.findOne({ employeeId, assignedDate: date })
+    .sort({ sortOrder: 1 });
+  if (firstJob?.beforeUploadedAt) {
+    const ist  = new Date(firstJob.beforeUploadedAt.getTime() + 5.5 * 60 * 60 * 1000);
+    const hhmm = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+    if (hhmm > 6 * 60 + 15) reasons.push('late');
+  } else {
+    reasons.push('late');
+  }
+
+  // Minimum 5 completed cars
+  const completedCount = await Job.countDocuments({
+    employeeId, assignedDate: date, status: 'Completed' });
+  if (completedCount < 5) reasons.push('minCars');
+
+  // No unresolved complaints
+  const complainedJob = await Job.findOne({
+    employeeId, assignedDate: date,
+    'complaint.raised':   true,
+    'complaint.resolved': { $ne: true },
+  });
+  if (complainedJob) reasons.push('complaint');
+
+  return {
+    earned:    reasons.length === 0,
+    amount:    reasons.length === 0 ? incentiveAmt : 0,
+    isSaturday,
+    reasons,
+  };
+}
+
 // Half-down rounding: rounds up only if fraction is strictly > 0.5
 // e.g. 28.5 → 28, 28.51 → 29
 function halfDownRound(value) {
-  return Math.ceil(value - 0.5);
+  return Math.max(0, Math.ceil(value - 0.5));
 }
 
 // Haversine fallback
@@ -477,19 +530,11 @@ router.get('/my-salary/:employeeId', async (req, res) => {
       const dayDistEarnings = halfDownRound(
           dayKm * (pricing.distancePerKm ?? 2));
 
-      // Incentive for this day
+      // Full incentive check — same criteria as admin salary
       const record = attMap[date];
-      let incAmt = 0;
-      if (record) {
-        if (record.incentiveExcused) {
-          incAmt = pricing.dailyIncentive ?? 100;
-        } else {
-          const ok = record.selfieApproval    === 'approved' &&
-                     record.towelsApproval    === 'approved' &&
-                     record.towelSoakApproval === 'approved';
-          if (ok) incAmt = pricing.dailyIncentive ?? 100;
-        }
-      }
+      const inc    = await computeIncentiveFull(
+          record, req.params.employeeId, date, pricing);
+      const incAmt = inc.amount;
 
       totalEarnings         += dayEarnings;
       totalIncentive        += incAmt;
@@ -594,59 +639,25 @@ router.get('/incentive-history/:employeeId', async (req, res) => {
 
     // Only compute for dates that have an attendance record
     const days = [];
-    for (const date of dates) {
-      const record = recordMap[date];
-      if (!record) continue; // no attendance = no work = skip
-
-      // Inline incentive check (mirrors computeIncentive in admin.js)
-      const isSaturday = new Date(date + 'T12:00:00Z').getUTCDay() === 6;
-      const reasons    = [];
-
-      if (record.incentiveExcused) {
-        days.push({ date, earned: true, excused: true,
-            amount: pricing.dailyIncentive ?? 100, reasons: [], isSaturday });
-        continue;
-      }
-
-      if (record.selfieApproval  !== 'approved') reasons.push('selfie');
-      if (record.towelsApproval  !== 'approved') reasons.push('towels');
-      if (!record.towelSoakUrl)                  reasons.push('towelSoakMissing');
-      else if (record.towelSoakApproval !== 'approved') reasons.push('towelSoak');
-      if (isSaturday) {
-        if (!record.dusterSoakUrl)               reasons.push('dusterSoakMissing');
-        else if (record.dusterSoakApproval !== 'approved') reasons.push('dusterSoak');
-      }
-
-      // Check first job before time
-      const firstJob = await Job.findOne({
-        employeeId:   req.params.employeeId,
-        assignedDate: date,
-      }).sort({ sortOrder: 1 });
-
-      if (firstJob?.beforeUploadedAt) {
-        const ist  = new Date(firstJob.beforeUploadedAt.getTime() + 5.5 * 60 * 60 * 1000);
-        const hhmm = ist.getHours() * 60 + ist.getMinutes();
-        if (hhmm > 6 * 60 + 15) reasons.push('late');
-      } else {
-        reasons.push('late');
-      }
-
-      const complainedJob = await Job.findOne({
-        employeeId:           req.params.employeeId,
-        assignedDate:         date,
-        'complaint.raised':   true,
-      });
-      if (complainedJob) reasons.push('complaint');
-
-      days.push({
-        date,
-        earned:     reasons.length === 0,
-        excused:    false,
-        amount:     reasons.length === 0 ? (pricing.dailyIncentive ?? 100) : 0,
-        reasons,
-        isSaturday,
-      });
-    }
+    // Run all days in parallel for speed
+    const dayResults = await Promise.all(
+      dates
+        .filter(date => recordMap[date]) // skip days with no attendance
+        .map(async date => {
+          const record = recordMap[date];
+          const inc    = await computeIncentiveFull(
+              record, req.params.employeeId, date, pricing);
+          return {
+            date,
+            earned:    inc.earned,
+            excused:   inc.excused || false,
+            amount:    inc.amount,
+            reasons:   inc.reasons,
+            isSaturday:inc.isSaturday,
+          };
+        })
+    );
+    days.push(...dayResults);
 
     const totalEarned = days.filter(d => d.earned).reduce((s, d) => s + d.amount, 0);
     const earnedDays  = days.filter(d => d.earned).length;
