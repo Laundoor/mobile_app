@@ -277,12 +277,14 @@ router.delete('/employees/:id', adminAuth, async (req, res) => {
 router.post('/customers', adminAuth, async (req, res) => {
   try {
     const { customerName, address, vehicleNumber, vehicleColor,
-            carModel, carType, phone, mapsLink } = req.body;
+            carModel, carType, interiorType, phone, mapsLink } = req.body;
     if (!customerName) return res.status(400).send("customerName required");
     const location = await extractLatLng(mapsLink);
     const customer = await Customer.create({
       customerName, address, vehicleNumber, vehicleColor,
-      carModel, carType, phone,
+      carModel, carType,
+      interiorType: interiorType || 'None',
+      phone,
       mapsLink: mapsLink || null,
       location: location || { lat: null, lng: null },
     });
@@ -357,10 +359,24 @@ router.post('/assign', adminAuth, async (req, res) => {
     if (!customerId || !employeeId || !serviceType)
       return res.status(400).send("customerId, employeeId, serviceType required");
     const today    = assignedDate || todayIST();
+
+    // Determine service category: 'Exterior' or 'Interior'
+    const category = (serviceType === 'Exterior') ? 'Exterior' : 'Interior';
+    const catTypes  = category === 'Exterior'
+      ? ['Exterior']
+      : ['Interior Standard', 'Interior Premium'];
+
+    // Block only if same service CATEGORY already assigned (non-cancelled)
+    // e.g. can assign Exterior + Interior Standard to same customer same day
     const existing = await Job.findOne({
-      customerId, assignedDate: today, status: { $nin: ['Cancelled'] },
+      customerId,
+      assignedDate: today,
+      serviceType:  { $in: catTypes },
+      status:       { $nin: ['Cancelled'] },
     });
-    if (existing) return res.status(400).send("Customer already assigned today");
+    if (existing)
+      return res.status(400).send(
+        `Customer already has a ${category} job assigned today`);
 
     // Block assignment if employee has already completed towel soak for today
     // (means their day is done — no new jobs should be added)
