@@ -57,11 +57,6 @@ router.post('/', upload.single('image'), async (req, res) => {
         { $set: { selfieUrl: url, selfieUploadedAt: new Date() } },
         { upsert: true, new: true }
       );
-      // Mark employee active as soon as selfie is uploaded —
-      // proves they showed up even if first job is later cancelled
-      await User.findByIdAndUpdate(employeeId, {
-        isActive: true, lastActiveDate: date,
-      });
     } catch (err) { console.error("DB error:", err); }
     return res.json({ url });
   }
@@ -164,6 +159,12 @@ router.post('/', upload.single('image'), async (req, res) => {
       job.images.after.push({ label: afterLabel, url: s3Url });
     } else if (photoType === 'cancel') {
       job.cancelPhotoUrl = s3Url;
+      // Employee showed up even though job was cancelled — mark active
+      if (employeeId) {
+        await User.findByIdAndUpdate(employeeId, {
+          isActive: true, lastActiveDate: today(),
+        });
+      }
     }
 
     await job.save();
