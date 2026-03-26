@@ -86,7 +86,6 @@ function adminAuth(req, res, next) {
   }
 }
 
-const axios = require('axios');
 // Haversine distance in KM — used as fallback
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R    = 6371;
