@@ -8,48 +8,17 @@ const Job      = require('../models/job');
 const Config   = require('../models/config');
 const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
-
-// Returns current date in IST (UTC+5:30) as YYYY-MM-DD
-function todayIST() {
-  const now = new Date();
-  const ist = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
-  return ist.toISOString().split('T')[0];
-}
-
-// Half-down rounding: rounds up only if fraction is strictly > 0.5
-// e.g. 28.5 → 28, 28.51 → 29, 28.4 → 28, 28.9 → 29
-function halfDownRound(value) {
-  return Math.ceil(value - 0.5);
-}
-
-// ── MIDDLEWARE ────────────────────────────────────────────────────────────────
-function adminAuth(req, res, next) {
-  const header = req.headers['authorization'];
-  if (!header) return res.status(401).send("No token");
-  const token = header.split(' ')[1];
-  try {
-    const decoded = jwt.verify(token, "secretkey");
-    if (decoded.role !== 'admin') return res.status(403).send("Admins only");
-    req.adminId = decoded.id;
-    next();
-  } catch {
-    res.status(401).send("Invalid token");
-  }
-}
-
-const axios = require('axios');
+const axios    = require('axios');
 
 // Extract lat/lng from any Google Maps URL (short or full)
-// Ported from old app — proven working
 async function extractLatLng(url) {
   try {
     if (!url) return null;
 
     // Step 0: Direct ?q=lat,lng pattern
     const directMatch = url.match(/q=(-?\d+\.\d+),(-?\d+\.\d+)/);
-    if (directMatch) {
+    if (directMatch)
       return { lat: parseFloat(directMatch[1]), lng: parseFloat(directMatch[2]) };
-    }
 
     // Step 1: Expand shortened URLs (maps.app.goo.gl / goo.gl/maps)
     if (/maps\.app\.goo\.gl|goo\.gl\/maps/.test(url)) {
@@ -77,9 +46,8 @@ async function extractLatLng(url) {
     ];
     for (const regex of patterns) {
       const match = url.match(regex);
-      if (match) {
+      if (match)
         return { lat: parseFloat(match[1]), lng: parseFloat(match[2]) };
-      }
     }
 
     console.log('[extractLatLng] Could not extract coords from:', url);
@@ -90,8 +58,35 @@ async function extractLatLng(url) {
   }
 }
 
+// Returns current date in IST (UTC+5:30) as YYYY-MM-DD
+function todayIST() {
+  const now = new Date();
+  const ist = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+  return ist.toISOString().split('T')[0];
+}
 
+// Half-down rounding: rounds up only if fraction is strictly > 0.5
+// e.g. 28.5 → 28, 28.51 → 29, 28.4 → 28, 28.9 → 29
+function halfDownRound(value) {
+  return Math.max(0, Math.ceil(value - 0.5));
+}
 
+// ── MIDDLEWARE ────────────────────────────────────────────────────────────────
+function adminAuth(req, res, next) {
+  const header = req.headers['authorization'];
+  if (!header) return res.status(401).send("No token");
+  const token = header.split(' ')[1];
+  try {
+    const decoded = jwt.verify(token, "secretkey");
+    if (decoded.role !== 'admin') return res.status(403).send("Admins only");
+    req.adminId = decoded.id;
+    next();
+  } catch {
+    res.status(401).send("Invalid token");
+  }
+}
+
+const axios = require('axios');
 // Haversine distance in KM — used as fallback
 function haversineKm(lat1, lng1, lat2, lng2) {
   const R    = 6371;
@@ -451,8 +446,6 @@ router.delete('/planner/:jobId', adminAuth, async (req, res) => {
   } catch (err) { res.status(500).send("Server error"); }
 });
 
-
-
 router.put('/reassign', adminAuth, async (req, res) => {
   try {
     const { jobId, newEmployeeId } = req.body;
@@ -805,8 +798,6 @@ router.get('/employees/:id/complaints', adminAuth, async (req, res) => {
     res.json({ total: result.length, resolved: result.filter(r => r.resolved).length, complaints: result });
   } catch (err) { res.status(500).send("Server error"); }
 });
-
-
 router.post('/seed', async (req, res) => {
   try {
     const { name, email, password, secretKey } = req.body;
@@ -904,7 +895,40 @@ router.get('/attendance/my-status/:employeeId', async (req, res) => {
   } catch (err) { res.status(500).send("Server error"); }
 });
 
-// GET /admin/attendance/:employeeId?date=YYYY-MM-DD
+// POST /admin/reset-day/:employeeId?date=YYYY-MM-DD
+// Testing only — hard deletes all jobs + attendance for an employee on a date
+// Restores customer service counts for any completed jobs
+router.post('/reset-day/:employeeId', adminAuth, async (req, res) => {
+  try {
+    const empId = req.params.employeeId;
+    const date  = req.query.date || todayIST();
+
+    // 1. Find all jobs for this employee on this date
+    const jobs = await Job.find({ employeeId: empId, assignedDate: date });
+
+    // 2. For each completed job, decrement the customer's serviceCount
+    const completedJobs = jobs.filter(j => j.status === 'Completed');
+    await Promise.all(completedJobs.map(j =>
+      Customer.findByIdAndUpdate(j.customerId, { $inc: { serviceCount: -1 } })
+    ));
+
+    // 3. Hard delete all jobs for this employee on this date
+    const jobResult = await Job.deleteMany({ employeeId: empId, assignedDate: date });
+
+    // 4. Delete the attendance record
+    const attResult = await Attendance.deleteOne({ employeeId: empId, date });
+
+    res.json({
+      success:         true,
+      jobsDeleted:     jobResult.deletedCount,
+      attendanceReset: attResult.deletedCount > 0,
+      serviceCountsRestored: completedJobs.length,
+    });
+  } catch (err) {
+    console.error('[reset-day]', err);
+    res.status(500).send('Server error');
+  }
+});
 router.get('/attendance/:employeeId', adminAuth, async (req, res) => {
   try {
     const date     = req.query.date || todayIST();
