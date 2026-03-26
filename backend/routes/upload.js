@@ -57,6 +57,11 @@ router.post('/', upload.single('image'), async (req, res) => {
         { $set: { selfieUrl: url, selfieUploadedAt: new Date() } },
         { upsert: true, new: true }
       );
+      // Mark employee active as soon as selfie is uploaded —
+      // proves they showed up even if first job is later cancelled
+      await User.findByIdAndUpdate(employeeId, {
+        isActive: true, lastActiveDate: date,
+      });
     } catch (err) { console.error("DB error:", err); }
     return res.json({ url });
   }
