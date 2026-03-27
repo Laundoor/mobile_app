@@ -466,7 +466,8 @@ router.get('/my-salary/:employeeId', async (req, res) => {
 
     // Same rule as admin salary: unresolved complaints = not payable
     const isPayable = (job) =>
-      !job.complaint?.raised || job.complaint?.resolved === true;
+      job.status === 'Completed' &&
+      (!job.complaint?.raised || job.complaint?.resolved === true);
 
     // ── Step 1: compute job earnings + car counts synchronously (no I/O) ──────
     const dayData = sortedDates.map(([date, dayJobs]) => {
@@ -490,16 +491,14 @@ router.get('/my-salary/:employeeId', async (req, res) => {
         else counts['Hatchback']++;
       }
 
-      // Build route points — match admin logic:
-      // payable completed jobs + cancelled jobs count for distance
+      // Build route points — payable completed + cancelled jobs
       let routePoints = null;
       if (home) {
         const sorted = dayJobs
-          .filter(j => {
-            return (j.status === 'Completed' && isPayable(j)) ||
-                    j.status === 'Cancelled';
-          })
-          .filter(j => j.customerId?.location?.lat)
+          .filter(j =>
+            ((j.status === 'Completed' && isPayable(j)) ||
+              j.status === 'Cancelled') &&
+            j.customerId?.location?.lat)
           .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
         if (sorted.length > 0) {
           const waypoints = sorted.map(j => ({
@@ -513,14 +512,33 @@ router.get('/my-salary/:employeeId', async (req, res) => {
       return { date, dayJobs, completedJobs, dayEarnings, counts, routePoints };
     });
 
-    // ── Step 2: fire ALL distance API calls in parallel ──────────────────────
-    // 26 sequential awaits → 26 concurrent requests → total time ≈ slowest single call
+    // Helper: is the day fully complete — safe to cache distance
+    const isDayComplete = (date) => {
+      const r = attMap[date];
+      if (!r) return false;
+      const isSat = new Date(date + 'T12:00:00Z').getUTCDay() === 6;
+      return isSat
+        ? !!(r.towelSoakUrl && r.dusterSoakUrl)
+        : !!r.towelSoakUrl;
+    };
+
+    // ── Step 2: distance — cache-first, API only when needed ─────────────────
     const distanceResults = await Promise.all(
-      dayData.map(d =>
-        d.routePoints
-          ? computeDayDistanceKm(d.routePoints)
-          : Promise.resolve(0)
-      )
+      dayData.map(async d => {
+        if (!d.routePoints) return 0;
+        const rec    = attMap[d.date];
+        const cached = rec?.distanceKm;
+        // Use cached value if day is complete and cache exists
+        if (isDayComplete(d.date) && cached != null) return cached;
+        // Call Google API
+        const dayKm = await computeDayDistanceKm(d.routePoints);
+        // Write cache if day is complete
+        if (isDayComplete(d.date) && rec) {
+          await Attendance.findByIdAndUpdate(rec._id,
+            { $set: { distanceKm: parseFloat(dayKm.toFixed(2)) } });
+        }
+        return dayKm;
+      })
     );
 
     // ── Step 3: assemble final response ─────────────────────────────────────

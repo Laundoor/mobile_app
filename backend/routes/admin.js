@@ -497,18 +497,24 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
 
     const jobs = await Job.find({
       employeeId,
-      status:      'Completed',
-      completedAt: { $gte: from, $lt: to },
+      status:      { $in: ['Completed', 'Cancelled'] },
+      $or: [
+        { completedAt: { $gte: from, $lt: to } },
+        { cancelledAt: { $gte: from, $lt: to } },
+      ],
     }).populate('customerId', 'customerName carType carModel vehicleNumber mapsLink location');
 
-    // Helper: is this job payable (no unresolved complaint)
+    // Helper: job earns wages only if completed with no unresolved complaint
     const isPayable = (job) =>
-      !job.complaint?.raised || job.complaint?.resolved === true;
+      job.status === 'Completed' &&
+      (!job.complaint?.raised || job.complaint?.resolved === true);
 
     // Group by date (IST) — only payable jobs count for distance
     const byDate = {};
     for (const job of jobs) {
-      const ist = new Date(job.completedAt.getTime() + 5.5 * 60 * 60 * 1000);
+      const ts  = job.completedAt || job.cancelledAt;
+      if (!ts) continue;
+      const ist = new Date(ts.getTime() + 5.5 * 60 * 60 * 1000);
       const dk  = ist.toISOString().split('T')[0];
       if (!byDate[dk]) byDate[dk] = [];
       byDate[dk].push(job);
@@ -618,14 +624,68 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
       }
     }
 
-    // ── Pass 2: fire ALL distance API calls in parallel ───────────────────────
-    if (distanceTasks.length > 0) {
+    // Fetch attendance records early — needed for both distance cache and incentive
+    const attendanceRecords = await Attendance.find({
+      employeeId,
+      date: { $gte: from.toISOString().split('T')[0], $lte: to.toISOString().split('T')[0] },
+    });
+    const attByDate = {};
+    for (const r of attendanceRecords) attByDate[r.date] = r;
+
+    // Helper: is the day fully complete (towel soak done — route won't change)
+    const isDayComplete = (date) => {
+      const r = attByDate[date];
+      if (!r) return false;
+      const isSat = new Date(date + 'T12:00:00Z').getUTCDay() === 6;
+      return isSat
+        ? !!(r.towelSoakUrl && r.dusterSoakUrl)
+        : !!r.towelSoakUrl;
+    };
+
+    // ── Pass 2: distance — read from cache or call Google API ────────────────
+    // For complete days: check attendance.distanceKm first (free)
+    // Only call Google API for days without a cached value
+    // After computing, write back to attendance record for future calls
+
+    // Split into cached and uncached
+    const cachedDates   = [];
+    const uncachedTasks = [];
+
+    for (const { date, routePoints, skipped } of distanceTasks) {
+      const rec    = attByDate[date];
+      const cached = rec?.distanceKm;
+      if (isDayComplete(date) && cached != null) {
+        // Use cached value — free
+        cachedDates.push({ date, dayKm: cached, skipped });
+      } else {
+        // Need to call Google API
+        uncachedTasks.push({ date, routePoints, skipped, rec });
+      }
+    }
+
+    // Apply cached results immediately
+    for (const { date, dayKm, skipped } of cachedDates) {
+      const dayDistEarn = halfDownRound(dayKm * (pricing.distancePerKm ?? 2));
+      totalDistanceKm       += dayKm;
+      totalDistanceEarnings += dayDistEarn;
+      dayDetails[date].distanceKm       = parseFloat(dayKm.toFixed(2));
+      dayDetails[date].distanceEarnings = dayDistEarn;
+      if (skipped > 0) totalSkippedCustomers += skipped;
+    }
+
+    // Fire uncached API calls in parallel
+    if (uncachedTasks.length > 0) {
       const distResults = await Promise.all(
-        distanceTasks.map(({ date, routePoints, skipped }) =>
-          computeDayDistanceKm(routePoints).then(dayKm => ({
-            date, dayKm, skipped,
-            dayDistEarn: halfDownRound(dayKm * (pricing.distancePerKm ?? 2)),
-          }))
+        uncachedTasks.map(({ date, routePoints, skipped, rec }) =>
+          computeDayDistanceKm(routePoints).then(async dayKm => {
+            // Cache the result if the day is complete
+            if (isDayComplete(date) && rec) {
+              await Attendance.findByIdAndUpdate(rec._id,
+                { $set: { distanceKm: parseFloat(dayKm.toFixed(2)) } });
+            }
+            return { date, dayKm, skipped,
+              dayDistEarn: halfDownRound(dayKm * (pricing.distancePerKm ?? 2)) };
+          })
         )
       );
       for (const { date, dayKm, skipped, dayDistEarn } of distResults) {
@@ -639,12 +699,6 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
 
     const complainedJobs  = jobs.filter(j => j.complaint?.raised && !j.complaint?.resolved);
     const resolvedJobs    = jobs.filter(j => j.complaint?.raised &&  j.complaint?.resolved);
-
-    // Incentive — compute per working day (days that have attendance records)
-    const attendanceRecords = await Attendance.find({
-      employeeId,
-      date: { $gte: from.toISOString().split('T')[0], $lte: to.toISOString().split('T')[0] },
-    });
 
     // ── Pass 3: compute incentive for all days in parallel ────────────────────
     let totalIncentive = 0;

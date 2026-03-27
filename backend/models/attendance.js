@@ -19,6 +19,10 @@ const attendanceSchema = new mongoose.Schema({
 
   // Incentive
   incentiveExcused: { type: Boolean, default: false }, // admin excuse pass
+
+  // Distance cache — set when day is complete (towel soak uploaded)
+  // Avoids re-calling Google Distance Matrix API for past completed days
+  distanceKm: { type: Number, default: null },
 }, { timestamps: true });
 
 // One record per employee per day
