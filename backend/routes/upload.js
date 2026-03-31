@@ -32,9 +32,10 @@ async function s3Upload(key, file) {
 
 // ─── POST /upload ─────────────────────────────────────────────────────────────
 // photoType: selfie | towel | towel_soak | duster_soak | before | after | cancel
+//            interior_before | interior_after
 //
 // selfie / towel / towel_soak / duster_soak → require employeeId, store in Attendance
-// before / after / cancel                   → require jobId
+// before / after / cancel / interior_*      → require jobId
 // ─────────────────────────────────────────────────────────────────────────────
 router.post('/', upload.single('image'), async (req, res) => {
   const file = req.file;
@@ -132,6 +133,12 @@ router.post('/', upload.single('image'), async (req, res) => {
   } else if (photoType === 'after') {
     const safeLabel = (label || 'photo').toLowerCase().replace(/\s+/g, '-');
     s3Key = `jobs/${jobId}/after-${safeLabel}.jpg`;
+  } else if (photoType === 'interior_before') {
+    const safeLabel = (label || 'photo').toLowerCase().replace(/\s+/g, '-');
+    s3Key = `jobs/${jobId}/interior-before-${safeLabel}.jpg`;
+  } else if (photoType === 'interior_after') {
+    const safeLabel = (label || 'photo').toLowerCase().replace(/\s+/g, '-');
+    s3Key = `jobs/${jobId}/interior-after-${safeLabel}.jpg`;
   } else if (photoType === 'cancel') {
     s3Key = `jobs/${jobId}/cancel.jpg`;
   } else {
@@ -157,6 +164,21 @@ router.post('/', upload.single('image'), async (req, res) => {
     } else if (photoType === 'after') {
       const afterLabel = label || `Photo ${job.images.after.length + 1}`;
       job.images.after.push({ label: afterLabel, url: s3Url });
+    } else if (photoType === 'interior_before') {
+      const beforeLabel = label || `Photo ${job.images.interiorBefore.length + 1}`;
+      // First interior_before photo acts as "start" — set beforeUploadedAt + active
+      if (job.images.interiorBefore.length === 0) {
+        job.beforeUploadedAt = new Date();
+        if (employeeId) {
+          await User.findByIdAndUpdate(employeeId, {
+            isActive: true, lastActiveDate: today(),
+          });
+        }
+      }
+      job.images.interiorBefore.push({ label: beforeLabel, url: s3Url });
+    } else if (photoType === 'interior_after') {
+      const afterLabel = label || `Photo ${job.images.interiorAfter.length + 1}`;
+      job.images.interiorAfter.push({ label: afterLabel, url: s3Url });
     } else if (photoType === 'cancel') {
       job.cancelPhotoUrl = s3Url;
       // Employee showed up even though job was cancelled — mark active

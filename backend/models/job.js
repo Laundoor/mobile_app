@@ -31,6 +31,9 @@ const jobSchema = new mongoose.Schema({
     before:    { type: String, default: null },
     after:     [{ label: { type: String }, url: { type: String } }],
     towelSoak: { type: String, default: null },
+    // Interior-specific 8-photo sets (only for Interior Standard/Premium jobs)
+    interiorBefore: [{ label: { type: String }, url: { type: String } }],
+    interiorAfter:  [{ label: { type: String }, url: { type: String } }],
   },
 
   completedAt:       { type: Date, default: null },

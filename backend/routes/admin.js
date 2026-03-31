@@ -1084,4 +1084,123 @@ router.get('/attendance/:employeeId/incentive-status', async (req, res) => {
   } catch (err) { console.error(err); res.status(500).send("Server error"); }
 });
 
+// ── GET /admin/interior/todo?month=&year= ─────────────────────────────────────
+// Returns customers with interior type who haven't had interior done this month
+// Ordered by last month's completion date ascending
+router.get('/interior/todo', adminAuth, async (req, res) => {
+  try {
+    const now   = new Date();
+    const month = parseInt(req.query.month) || (now.getMonth() + 1);
+    const year  = parseInt(req.query.year)  || now.getFullYear();
+
+    // Current month range
+    const from = new Date(year, month - 1, 1);
+    const to   = new Date(year, month, 1);
+
+    // Previous month range
+    const prevMonth = month === 1 ? 12 : month - 1;
+    const prevYear  = month === 1 ? year - 1 : year;
+    const prevFrom  = new Date(prevYear, prevMonth - 1, 1);
+    const prevTo    = new Date(prevYear, prevMonth, 1);
+
+    // All customers with interior type set
+    const customers = await Customer.find({
+      interiorType: { $in: ['Interior Standard', 'Interior Premium'] }
+    });
+
+    // Jobs completed this month that are interior type
+    const doneThisMonth = await Job.find({
+      serviceType: { $in: ['Interior Standard', 'Interior Premium'] },
+      status:      'Completed',
+      completedAt: { $gte: from, $lt: to },
+    }).select('customerId completedAt');
+
+    const doneCustomerIds = new Set(
+      doneThisMonth.map(j => j.customerId.toString()));
+
+    // Customers not done this month = to-do
+    const todoCustomers = customers.filter(
+      c => !doneCustomerIds.has(c._id.toString()));
+
+    // For each to-do customer find last month's completion date
+    const lastMonthJobs = await Job.find({
+      customerId:  { $in: todoCustomers.map(c => c._id) },
+      serviceType: { $in: ['Interior Standard', 'Interior Premium'] },
+      status:      'Completed',
+      completedAt: { $gte: prevFrom, $lt: prevTo },
+    }).select('customerId completedAt');
+
+    const lastMonthMap = {};
+    for (const j of lastMonthJobs) {
+      lastMonthMap[j.customerId.toString()] = j.completedAt;
+    }
+
+    // Build result with category for filtering
+    const result = todoCustomers.map(c => {
+      const lastDone  = lastMonthMap[c._id.toString()] || null;
+      const isNew     = c.createdAt >= from;
+      const doneLastMonth = !!lastDone;
+      return {
+        _id:          c._id,
+        customerName: c.customerName,
+        interiorType: c.interiorType,
+        vehicleNumber:c.vehicleNumber,
+        carModel:     c.carModel,
+        carType:      c.carType,
+        lastDoneDate: lastDone,
+        isNew,
+        doneLastMonth,
+      };
+    });
+
+    // Sort: done last month by date asc, then not done last month, then new
+    result.sort((a, b) => {
+      if (a.doneLastMonth && b.doneLastMonth)
+        return new Date(a.lastDoneDate) - new Date(b.lastDoneDate);
+      if (a.doneLastMonth) return -1;
+      if (b.doneLastMonth) return 1;
+      if (a.isNew && !b.isNew) return 1;
+      if (!a.isNew && b.isNew) return -1;
+      return a.customerName.localeCompare(b.customerName);
+    });
+
+    res.json({ month, year, customers: result });
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── GET /admin/interior/history?month=&year= ──────────────────────────────────
+// Returns completed interior jobs for the month, desc by completedAt
+router.get('/interior/history', adminAuth, async (req, res) => {
+  try {
+    const now   = new Date();
+    const month = parseInt(req.query.month) || (now.getMonth() + 1);
+    const year  = parseInt(req.query.year)  || now.getFullYear();
+    const from  = new Date(year, month - 1, 1);
+    const to    = new Date(year, month, 1);
+
+    const jobs = await Job.find({
+      serviceType: { $in: ['Interior Standard', 'Interior Premium'] },
+      status:      'Completed',
+      completedAt: { $gte: from, $lt: to },
+    })
+      .populate('customerId', 'customerName vehicleNumber carModel carType')
+      .populate('employeeId', 'name')
+      .sort({ completedAt: -1 });
+
+    const result = jobs.map(j => ({
+      jobId:        j._id,
+      customerId:   j.customerId?._id,
+      customerName: j.customerId?.customerName || '',
+      vehicleNumber:j.customerId?.vehicleNumber || '',
+      carModel:     j.customerId?.carModel || '',
+      carType:      j.customerId?.carType || '',
+      interiorType: j.serviceType,
+      completedAt:  j.completedAt,
+      employeeName: j.employeeId?.name || '',
+    }));
+
+    res.json({ month, year, jobs: result });
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
 module.exports = router;
