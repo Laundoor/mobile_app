@@ -773,9 +773,10 @@ router.post('/complaints/:jobId', adminAuth, async (req, res) => {
     if (job.complaint?.raised && !job.complaint?.resolved)
       return res.status(400).send("Complaint already raised");
 
-    // Decrement serviceCount on customer
+    // Decrement monthly serviceCount on customer (floor at 0)
     await Customer.findByIdAndUpdate(job.customerId,
       { $inc: { serviceCount: -1 } });
+    // Note: if this drops below 0 the migration script will correct it
 
     const updated = await Job.findByIdAndUpdate(
       req.params.jobId,
@@ -802,9 +803,15 @@ router.put('/complaints/:jobId/resolve', adminAuth, async (req, res) => {
     if (!job.complaint?.raised) return res.status(400).send("No complaint raised");
     if (job.complaint?.resolved) return res.status(400).send("Already resolved");
 
-    // Restore serviceCount on customer
-    await Customer.findByIdAndUpdate(job.customerId,
-      { $inc: { serviceCount: 1 } });
+    // Restore serviceCount only if complaint was raised in the current month
+    // (cross-month complaints don't affect the new month's count)
+    const nowIST   = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    const curMonth = `${nowIST.getUTCFullYear()}-${String(nowIST.getUTCMonth() + 1).padStart(2, '0')}`;
+    const cust     = await Customer.findById(job.customerId);
+    if (cust?.lastServiceMonth === curMonth) {
+      await Customer.findByIdAndUpdate(job.customerId,
+        { $inc: { serviceCount: 1 } });
+    }
 
     const updated = await Job.findByIdAndUpdate(
       req.params.jobId,

@@ -211,12 +211,20 @@ router.put('/:id/status', async (req, res) => {
 
     job.status = status;
 
-    // On completion: increment customer service count + snapshot it on job
+    // On completion: monthly count reset if new month, then increment + snapshot
     if (status === 'Completed') {
       job.completedAt = new Date();
+      const nowIST   = new Date(job.completedAt.getTime() + 5.5 * 60 * 60 * 1000);
+      const curMonth = `${nowIST.getUTCFullYear()}-${String(nowIST.getUTCMonth() + 1).padStart(2, '0')}`;
+
+      const existing = await Customer.findById(job.customerId);
+      const needsReset = existing?.lastServiceMonth !== curMonth;
+
       const customer = await Customer.findByIdAndUpdate(
         job.customerId,
-        { $inc: { serviceCount: 1 } },
+        needsReset
+          ? { $set: { serviceCount: 1, lastServiceMonth: curMonth } }
+          : { $inc: { serviceCount: 1 }, $set: { lastServiceMonth: curMonth } },
         { new: true }
       );
       job.serviceCount = customer.serviceCount;

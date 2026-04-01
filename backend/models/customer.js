@@ -16,7 +16,8 @@ const customerSchema = new mongoose.Schema({
     enum: ['None', 'Interior Standard', 'Interior Premium'],
     default: 'None'
   },
-  serviceCount:  { type: Number, default: 0 },
+  serviceCount:      { type: Number, default: 0 }, // monthly count — resets each month
+  lastServiceMonth:  { type: String, default: null }, // "YYYY-MM" of last completion
   phone:         { type: String, default: '' },
   carPhoto:      { type: String, default: null }, // S3 URL of car photo
   // Location for distance allowance calculation
