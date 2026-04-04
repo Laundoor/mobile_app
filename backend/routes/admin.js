@@ -313,20 +313,48 @@ router.get('/customers/:id', adminAuth, async (req, res) => {
 
 router.get('/customers/:id/history', adminAuth, async (req, res) => {
   try {
-    const jobs = await Job.find({ customerId: req.params.id })
-      .sort({ assignedDate: -1 })
-      .populate('employeeId', 'name email');
-
-    // Compute this month's service count (completed, non-cancelled)
     const now   = new Date();
-    const from  = new Date(now.getFullYear(), now.getMonth(), 1);
-    const to    = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-    const monthlyCount = jobs.filter(j =>
-      j.status === 'Completed' &&
-      j.completedAt && j.completedAt >= from && j.completedAt < to
-    ).length;
+    const ist   = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
+    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
 
-    res.json({ jobs, monthlyCount });
+    // Date range in UTC for the requested month (IST midnight boundaries)
+    const from = new Date(`${year}-${String(month).padStart(2,'0')}-01T00:00:00+05:30`);
+    const to   = month === 12
+      ? new Date(`${year + 1}-01-01T00:00:00+05:30`)
+      : new Date(`${year}-${String(month + 1).padStart(2,'0')}-01T00:00:00+05:30`);
+
+    const jobs = await Job.find({
+      customerId: req.params.id,
+      $or: [
+        { completedAt: { $gte: from, $lt: to } },
+        { cancelledAt: { $gte: from, $lt: to } },
+        { assignedDate: {
+            $gte: `${year}-${String(month).padStart(2,'0')}-01`,
+            $lt: month === 12
+              ? `${year + 1}-01-01`
+              : `${year}-${String(month + 1).padStart(2,'0')}-01`
+          }
+        },
+      ],
+    })
+      .sort({ assignedDate: -1, createdAt: -1 })
+      .populate('employeeId', 'name');
+
+    // Summary counts
+    const total     = jobs.length;
+    const completed = jobs.filter(j => j.status === 'Completed').length;
+    const cancelled = jobs.filter(j => j.status === 'Cancelled').length;
+    const exterior  = jobs.filter(j =>
+        j.status === 'Completed' && j.serviceType === 'Exterior').length;
+    const interior  = jobs.filter(j =>
+        j.status === 'Completed' &&
+        (j.serviceType === 'Interior Standard' ||
+         j.serviceType === 'Interior Premium')).length;
+
+    res.json({ month, year, jobs, summary: {
+      total, completed, cancelled, exterior, interior
+    }});
   } catch (err) { res.status(500).send("Server error"); }
 });
 
@@ -336,6 +364,14 @@ router.put('/customers/:id', adminAuth, async (req, res) => {
     const updates = { ...req.body };
     if (mapsLink !== undefined) {
       updates.location = await extractLatLng(mapsLink) || { lat: null, lng: null };
+    }
+    // When manually updating serviceCount, also stamp lastServiceMonth
+    // so the next job completion increments from the new count correctly
+    if (updates.serviceCount !== undefined) {
+      const now      = new Date();
+      const ist      = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+      const curMonth = `${ist.getUTCFullYear()}-${String(ist.getUTCMonth() + 1).padStart(2, '0')}`;
+      updates.lastServiceMonth = curMonth;
     }
     const customer = await Customer.findByIdAndUpdate(
       req.params.id, updates, { new: true });
@@ -901,14 +937,22 @@ async function computeIncentive(record, employeeId, date, pricing) {
   }
 
   // 5. Before photo of first job on or before 06:15 IST
+  // If sortOrder:1 job was cancelled (no beforeUploadedAt), use cancelledAt
+  // or fall back to the earliest job with a beforeUploadedAt
   const firstJob = await Job.findOne({ employeeId, assignedDate: date })
     .sort({ sortOrder: 1 });
-  if (firstJob?.beforeUploadedAt) {
-    const ist   = new Date(firstJob.beforeUploadedAt.getTime() + 5.5 * 60 * 60 * 1000);
-    const hhmm  = ist.getHours() * 60 + ist.getMinutes();
+  const startTs = firstJob?.beforeUploadedAt
+    || (firstJob?.status === 'Cancelled' ? firstJob?.cancelledAt : null)
+    || (await Job.findOne({
+          employeeId, assignedDate: date,
+          beforeUploadedAt: { $ne: null }
+        }).sort({ beforeUploadedAt: 1 }))?.beforeUploadedAt;
+  if (startTs) {
+    const ist  = new Date(new Date(startTs).getTime() + 5.5 * 60 * 60 * 1000);
+    const hhmm = ist.getUTCHours() * 60 + ist.getUTCMinutes();
     if (hhmm > 6 * 60 + 15) reasons.push('late'); // after 06:15
   } else {
-    reasons.push('late'); // no before photo at all
+    reasons.push('late'); // no timestamp at all
   }
 
   // 6. Minimum 5 completed cars for the day

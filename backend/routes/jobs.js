@@ -34,14 +34,22 @@ async function computeIncentiveFull(record, employeeId, date, pricing) {
   }
 
   // Before photo of first job on or before 06:15 IST
+  // If sortOrder:1 job was cancelled (no beforeUploadedAt), use its cancelledAt
+  // or fall back to the next job with a beforeUploadedAt
   const firstJob = await Job.findOne({ employeeId, assignedDate: date })
     .sort({ sortOrder: 1 });
-  if (firstJob?.beforeUploadedAt) {
-    const ist  = new Date(firstJob.beforeUploadedAt.getTime() + 5.5 * 60 * 60 * 1000);
+  const startTs = firstJob?.beforeUploadedAt
+    || (firstJob?.status === 'Cancelled' ? firstJob?.cancelledAt : null)
+    || (await Job.findOne({
+          employeeId, assignedDate: date,
+          beforeUploadedAt: { $ne: null }
+        }).sort({ beforeUploadedAt: 1 }))?.beforeUploadedAt;
+  if (startTs) {
+    const ist  = new Date(new Date(startTs).getTime() + 5.5 * 60 * 60 * 1000);
     const hhmm = ist.getUTCHours() * 60 + ist.getUTCMinutes();
     if (hhmm > 6 * 60 + 15) reasons.push('late');
   } else {
-    reasons.push('late');
+    reasons.push('late'); // no timestamp at all
   }
 
   // Minimum 5 completed cars
