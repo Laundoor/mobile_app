@@ -236,6 +236,21 @@ router.put('/:id/status', async (req, res) => {
         { new: true }
       );
       job.serviceCount = customer.serviceCount;
+
+      // If this is a reassigned job, auto-resolve the original complaint
+      if (job.originalJobId) {
+        const originalJob = await Job.findById(job.originalJobId)
+            .populate('employeeId', 'name');
+        // Get new employee name for resolvedBy
+        const newEmp = await User.findById(job.employeeId).select('name');
+        if (originalJob?.complaint?.raised && !originalJob.complaint?.resolved) {
+          await Job.findByIdAndUpdate(job.originalJobId, {
+            'complaint.resolved':   true,
+            'complaint.resolvedAt': new Date(),
+            'complaint.resolvedBy': newEmp?.name || 'Unknown',
+          });
+        }
+      }
     }
 
     await job.save();
@@ -642,6 +657,7 @@ router.get('/my-complaints/:employeeId', async (req, res) => {
       raisedAt:     j.complaint.raisedAt,
       resolved:     j.complaint.resolved,
       resolvedAt:   j.complaint.resolvedAt,
+      resolvedBy:   j.complaint.resolvedBy || null,
     }));
 
     res.json({

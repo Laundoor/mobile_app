@@ -856,11 +856,15 @@ router.put('/complaints/:jobId/resolve', adminAuth, async (req, res) => {
         { $inc: { serviceCount: 1 } });
     }
 
+    // resolvedBy: optional body param — name of who resolved it (admin or employee)
+    const resolvedBy = req.body?.resolvedBy || 'Admin';
+
     const updated = await Job.findByIdAndUpdate(
       req.params.jobId,
       {
         'complaint.resolved':   true,
         'complaint.resolvedAt': new Date(),
+        'complaint.resolvedBy': resolvedBy,
       },
       { new: true }
     ).populate('customerId');
@@ -1259,6 +1263,105 @@ router.get('/interior/history', adminAuth, async (req, res) => {
 
     res.json({ month, year, jobs: result });
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── POST /admin/jobs/:jobId/revert ────────────────────────────────────────────
+// Reverts an In Progress or Completed job back to Pending.
+// Clears all photo fields and timestamps in DB (S3 files kept).
+// If job was Completed, decrements customer serviceCount.
+// Blocked if complaint is raised on the job.
+router.post('/jobs/:jobId/revert', adminAuth, async (req, res) => {
+  try {
+    const job = await Job.findById(req.params.jobId);
+    if (!job) return res.status(404).send("Job not found");
+
+    if (!['In Progress', 'Completed'].includes(job.status)) {
+      return res.status(400).send("Only In Progress or Completed jobs can be reverted");
+    }
+    if (job.complaint?.raised) {
+      return res.status(400).send(
+        "Cannot revert a job with a complaint raised. Use reassign instead.");
+    }
+
+    const wasCompleted = job.status === 'Completed';
+
+    // Clear all job data
+    job.status           = 'Pending';
+    job.beforeUploadedAt = null;
+    job.completedAt      = null;
+    job.images.before    = null;
+    job.images.after     = [];
+    job.images.interiorBefore = [];
+    job.images.interiorAfter  = [];
+    job.serviceCount     = 0;
+
+    await job.save();
+
+    // Decrement customer serviceCount if job was completed
+    if (wasCompleted) {
+      const nowIST   = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+      const curMonth = `${nowIST.getUTCFullYear()}-${String(nowIST.getUTCMonth() + 1).padStart(2, '0')}`;
+      const cust     = await Customer.findById(job.customerId);
+      if (cust?.lastServiceMonth === curMonth && cust.serviceCount > 0) {
+        await Customer.findByIdAndUpdate(job.customerId,
+          { $inc: { serviceCount: -1 } });
+      }
+    }
+
+    const populated = await Job.findById(job._id).populate('customerId');
+    res.json(populated);
+  } catch (err) { console.error(err); res.status(500).send("Server error"); }
+});
+
+// ── POST /admin/jobs/:jobId/reassign ──────────────────────────────────────────
+// Reassigns a complained job to another employee.
+// Creates a fresh Pending job for the new employee.
+// Bypasses duplicate customer check (intentional reassignment).
+// When the new job completes, the original complaint auto-resolves.
+router.post('/jobs/:jobId/reassign', adminAuth, async (req, res) => {
+  try {
+    const { employeeId } = req.body;
+    if (!employeeId) return res.status(400).send("employeeId required");
+
+    const originalJob = await Job.findById(req.params.jobId)
+        .populate('employeeId', 'name');
+    if (!originalJob) return res.status(404).send("Job not found");
+    if (!originalJob.complaint?.raised) {
+      return res.status(400).send("Job must have a complaint to be reassigned");
+    }
+    if (originalJob.reassignedJobId) {
+      return res.status(400).send("Job already reassigned");
+    }
+
+    const newEmployee = await User.findById(employeeId).select('name');
+    if (!newEmployee) return res.status(404).send("Employee not found");
+
+    const today = todayIST();
+
+    // Get next sortOrder for new employee
+    const lastJob = await Job.findOne({ employeeId, assignedDate: today })
+        .sort({ sortOrder: -1 });
+    const sortOrder = lastJob ? lastJob.sortOrder + 1 : 1;
+
+    // Create fresh job for new employee — bypass duplicate check
+    const newJob = await Job.create({
+      customerId:   originalJob.customerId,
+      employeeId,
+      serviceType:  originalJob.serviceType,
+      assignedDate: today,
+      sortOrder,
+      status:       'Pending',
+      originalJobId: originalJob._id,
+    });
+
+    // Link original job to new job
+    await Job.findByIdAndUpdate(originalJob._id, {
+      reassignedJobId: newJob._id,
+    });
+
+    const populated = await Job.findById(newJob._id).populate('customerId');
+    res.json({ originalJob: originalJob._id, newJob: populated });
+  } catch (err) { console.error(err); res.status(500).send("Server error"); }
 });
 
 module.exports = router;

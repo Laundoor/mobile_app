@@ -49,7 +49,21 @@ const jobSchema = new mongoose.Schema({
     raisedAt:   { type: Date,   default: null },
     resolved:   { type: Boolean, default: false },
     resolvedAt: { type: Date,   default: null },
-  }, // photo taken at cancellation time
+    resolvedBy: { type: String, default: null }, // name of employee who resolved (reassigned or manual)
+  },
+
+  // If this job was reassigned, points to the new job created for another employee
+  reassignedJobId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Job',
+    default: null,
+  },
+  // If this job is a reassignment, points to the original complained job
+  originalJobId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Job',
+    default: null,
+  },
 
 }, { timestamps: true });
 
