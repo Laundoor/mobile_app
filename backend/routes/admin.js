@@ -1285,17 +1285,19 @@ router.post('/jobs/:jobId/revert', adminAuth, async (req, res) => {
 
     const wasCompleted = job.status === 'Completed';
 
-    // Clear all job data
-    job.status           = 'Pending';
-    job.beforeUploadedAt = null;
-    job.completedAt      = null;
-    job.images.before    = null;
-    job.images.after     = [];
-    job.images.interiorBefore = [];
-    job.images.interiorAfter  = [];
-    job.serviceCount     = 0;
-
-    await job.save();
+    // Use $set to clear all fields atomically — avoids Mongoose subdoc array issues
+    await Job.findByIdAndUpdate(job._id, {
+      $set: {
+        status:                 'Pending',
+        beforeUploadedAt:       null,
+        completedAt:            null,
+        serviceCount:           0,
+        'images.before':        null,
+        'images.after':         [],
+        'images.interiorBefore': [],
+        'images.interiorAfter':  [],
+      },
+    });
 
     // Decrement customer serviceCount if job was completed
     if (wasCompleted) {
