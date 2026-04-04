@@ -345,15 +345,22 @@ router.get('/customers/:id/history', adminAuth, async (req, res) => {
     const total     = jobs.length;
     const completed = jobs.filter(j => j.status === 'Completed').length;
     const cancelled = jobs.filter(j => j.status === 'Cancelled').length;
-    const exterior  = jobs.filter(j =>
-        j.status === 'Completed' && j.serviceType === 'Exterior').length;
-    const interior  = jobs.filter(j =>
+    const complaints = jobs.filter(j =>
+        j.complaint?.raised === true && j.complaint?.resolved !== true).length;
+
+    // Billable = Completed with no unresolved complaint
+    const exteriorBillable = jobs.filter(j =>
         j.status === 'Completed' &&
-        (j.serviceType === 'Interior Standard' ||
-         j.serviceType === 'Interior Premium')).length;
+        j.serviceType === 'Exterior' &&
+        !(j.complaint?.raised === true && j.complaint?.resolved !== true)).length;
+    const interiorBillable = jobs.filter(j =>
+        j.status === 'Completed' &&
+        (j.serviceType === 'Interior Standard' || j.serviceType === 'Interior Premium') &&
+        !(j.complaint?.raised === true && j.complaint?.resolved !== true)).length;
 
     res.json({ month, year, jobs, summary: {
-      total, completed, cancelled, exterior, interior
+      total, completed, cancelled, complaints,
+      exteriorBillable, interiorBillable,
     }});
   } catch (err) { res.status(500).send("Server error"); }
 });

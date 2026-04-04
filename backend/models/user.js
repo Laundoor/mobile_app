@@ -7,7 +7,8 @@ const userSchema = new mongoose.Schema({
   role:     { type: String, enum: ['admin', 'employee'], default: 'employee' },
   isActive: { type: Boolean, default: false },
   lastActiveDate: { type: String, default: null },
-  phone:       { type: String, default: null },
+  phone:            { type: String, default: null },
+  emergencyContact: { type: String, default: null },
   joiningDate: { type: String, default: null }, // "YYYY-MM-DD"
   // Home location for distance allowance
   homeLocation: {
