@@ -43,13 +43,14 @@ const jobSchema = new mongoose.Schema({
   cancelReason:      { type: String, default: null },
 
   complaint: {
-    raised:     { type: Boolean, default: false },
-    reason:     { type: String, default: null },
-    note:       { type: String, default: null },
-    raisedAt:   { type: Date,   default: null },
-    resolved:   { type: Boolean, default: false },
-    resolvedAt: { type: Date,   default: null },
-    resolvedBy: { type: String, default: null }, // name of employee who resolved (reassigned or manual)
+    raised:             { type: Boolean, default: false },
+    reason:             { type: String, default: null },
+    note:               { type: String, default: null },
+    raisedAt:           { type: Date,   default: null },
+    resolved:           { type: Boolean, default: false },
+    resolvedAt:         { type: Date,   default: null },
+    resolvedBy:         { type: String, default: null },
+    resolvedByReassign: { type: Boolean, default: false }, // true = resolved via reassignment, not payable for original employee
   },
 
   // If this job was reassigned, points to the new job created for another employee

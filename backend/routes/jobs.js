@@ -57,11 +57,14 @@ async function computeIncentiveFull(record, employeeId, date, pricing) {
     employeeId, assignedDate: date, status: 'Completed' });
   if (completedCount < 5) reasons.push('minCars');
 
-  // No unresolved complaints
+  // No complaints raised that day (unresolved OR resolved by reassignment)
   const complainedJob = await Job.findOne({
     employeeId, assignedDate: date,
-    'complaint.raised':   true,
-    'complaint.resolved': { $ne: true },
+    'complaint.raised': true,
+    $or: [
+      { 'complaint.resolved':  { $ne: true } },
+      { 'complaint.resolvedByReassign': true },
+    ],
   });
   if (complainedJob) reasons.push('complaint');
 
@@ -239,16 +242,25 @@ router.put('/:id/status', async (req, res) => {
 
       // If this is a reassigned job, auto-resolve the original complaint
       if (job.originalJobId) {
-        const originalJob = await Job.findById(job.originalJobId)
-            .populate('employeeId', 'name');
-        // Get new employee name for resolvedBy
-        const newEmp = await User.findById(job.employeeId).select('name');
+        const originalJob = await Job.findById(job.originalJobId);
+        const newEmp      = await User.findById(job.employeeId).select('name');
         if (originalJob?.complaint?.raised && !originalJob.complaint?.resolved) {
+          // Resolve with reassign flag — original employee is NOT payable
           await Job.findByIdAndUpdate(job.originalJobId, {
-            'complaint.resolved':   true,
-            'complaint.resolvedAt': new Date(),
-            'complaint.resolvedBy': newEmp?.name || 'Unknown',
+            'complaint.resolved':           true,
+            'complaint.resolvedAt':         new Date(),
+            'complaint.resolvedBy':         newEmp?.name || 'Unknown',
+            'complaint.resolvedByReassign': true,
           });
+          // Restore serviceCount — complaint was decremented when raised,
+          // now it should be restored (Karthikeyan's job added its own +1 separately)
+          const nowIST   = new Date(job.completedAt.getTime() + 5.5 * 60 * 60 * 1000);
+          const curMonth = `${nowIST.getUTCFullYear()}-${String(nowIST.getUTCMonth() + 1).padStart(2, '0')}`;
+          const cust     = await Customer.findById(job.customerId);
+          if (cust?.lastServiceMonth === curMonth) {
+            await Customer.findByIdAndUpdate(job.customerId,
+              { $inc: { serviceCount: 1 } });
+          }
         }
       }
     }
@@ -507,9 +519,12 @@ router.get('/my-salary/:employeeId', async (req, res) => {
     const sortedDates = Object.entries(byDate).sort();
 
     // Same rule as admin salary: unresolved complaints = not payable
+    // resolvedByReassign = true means another employee did the work — also not payable
     const isPayable = (job) =>
       job.status === 'Completed' &&
-      (!job.complaint?.raised || job.complaint?.resolved === true);
+      (!job.complaint?.raised ||
+        (job.complaint?.resolved === true &&
+         !job.complaint?.resolvedByReassign));
 
     // ── Step 1: compute job earnings + car counts synchronously (no I/O) ──────
     const dayData = sortedDates.map(([date, dayJobs]) => {

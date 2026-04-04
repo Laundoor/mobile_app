@@ -345,18 +345,24 @@ router.get('/customers/:id/history', adminAuth, async (req, res) => {
     const total     = jobs.length;
     const completed = jobs.filter(j => j.status === 'Completed').length;
     const cancelled = jobs.filter(j => j.status === 'Cancelled').length;
+    // Complaints = unresolved OR resolved by reassignment (bad work regardless)
     const complaints = jobs.filter(j =>
-        j.complaint?.raised === true && j.complaint?.resolved !== true).length;
+        j.complaint?.raised === true &&
+        (j.complaint?.resolved !== true ||
+         j.complaint?.resolvedByReassign === true)).length;
 
-    // Billable = Completed with no unresolved complaint
+    // Billable = Completed, no complaint OR complaint manually resolved by same employee
+    const isBillable = (j) =>
+        j.status === 'Completed' &&
+        (!j.complaint?.raised ||
+          (j.complaint?.resolved === true &&
+           !j.complaint?.resolvedByReassign));
+
     const exteriorBillable = jobs.filter(j =>
-        j.status === 'Completed' &&
-        j.serviceType === 'Exterior' &&
-        !(j.complaint?.raised === true && j.complaint?.resolved !== true)).length;
+        j.serviceType === 'Exterior' && isBillable(j)).length;
     const interiorBillable = jobs.filter(j =>
-        j.status === 'Completed' &&
-        (j.serviceType === 'Interior Standard' || j.serviceType === 'Interior Premium') &&
-        !(j.complaint?.raised === true && j.complaint?.resolved !== true)).length;
+        (j.serviceType === 'Interior Standard' ||
+         j.serviceType === 'Interior Premium') && isBillable(j)).length;
 
     res.json({ month, year, jobs, summary: {
       total, completed, cancelled, complaints,
@@ -548,9 +554,14 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
     }).populate('customerId', 'customerName carType carModel vehicleNumber mapsLink location');
 
     // Helper: job earns wages only if completed with no unresolved complaint
+    // Job earns wages only if completed with no complaint,
+    // or complaint was manually resolved (same employee fixed it).
+    // resolvedByReassign = true means another employee did the work — not payable.
     const isPayable = (job) =>
       job.status === 'Completed' &&
-      (!job.complaint?.raised || job.complaint?.resolved === true);
+      (!job.complaint?.raised ||
+        (job.complaint?.resolved === true &&
+         !job.complaint?.resolvedByReassign));
 
     // Group by date (IST) — only payable jobs count for distance
     const byDate = {};
@@ -974,12 +985,16 @@ async function computeIncentive(record, employeeId, date, pricing) {
   });
   if (completedCount < 5) reasons.push('minCars');
 
-  // 7. No unresolved complaints raised that day
+  // 7. No complaints raised that day (unresolved OR resolved by reassignment)
+  // resolvedByReassign = another employee fixed it — Dinesh still had bad work
   const complainedJob = await Job.findOne({
     employeeId,
     assignedDate: date,
-    'complaint.raised':    true,
-    'complaint.resolved':  { $ne: true }, // resolved complaints don't affect incentive
+    'complaint.raised': true,
+    $or: [
+      { 'complaint.resolved':  { $ne: true } },           // unresolved
+      { 'complaint.resolvedByReassign': true },            // resolved by someone else
+    ],
   });
   if (complainedJob) reasons.push('complaint');
 
