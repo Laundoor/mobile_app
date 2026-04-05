@@ -246,21 +246,15 @@ router.put('/:id/status', async (req, res) => {
         const newEmp      = await User.findById(job.employeeId).select('name');
         if (originalJob?.complaint?.raised && !originalJob.complaint?.resolved) {
           // Resolve with reassign flag — original employee is NOT payable
+          // NOTE: serviceCount is NOT restored here because Karthikeyan's
+          // completion above already incremented the count (+1).
+          // The complaint decrement stays offset by Karthikeyan's increment.
           await Job.findByIdAndUpdate(job.originalJobId, {
             'complaint.resolved':           true,
             'complaint.resolvedAt':         new Date(),
             'complaint.resolvedBy':         newEmp?.name || 'Unknown',
             'complaint.resolvedByReassign': true,
           });
-          // Restore serviceCount — complaint was decremented when raised,
-          // now it should be restored (Karthikeyan's job added its own +1 separately)
-          const nowIST   = new Date(job.completedAt.getTime() + 5.5 * 60 * 60 * 1000);
-          const curMonth = `${nowIST.getUTCFullYear()}-${String(nowIST.getUTCMonth() + 1).padStart(2, '0')}`;
-          const cust     = await Customer.findById(job.customerId);
-          if (cust?.lastServiceMonth === curMonth) {
-            await Customer.findByIdAndUpdate(job.customerId,
-              { $inc: { serviceCount: 1 } });
-          }
         }
       }
     }
