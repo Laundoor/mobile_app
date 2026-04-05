@@ -238,4 +238,36 @@ router.post('/employee-doc', upload.single('image'), async (req, res) => {
   res.json({ url: s3Url });
 });
 
+// ─── POST /upload/qr-image ───────────────────────────────────────────────────
+// Uploads a QR code image for invoice payment contacts (stored in config)
+// Query: contactIndex=0|1
+router.post('/qr-image', upload.single('image'), async (req, res) => {
+  const file = req.file;
+  if (!file) return res.status(400).send("No file provided");
+  const { contactIndex } = req.query;
+  if (contactIndex === undefined) return res.status(400).send("contactIndex required");
+
+  const idx    = parseInt(contactIndex);
+  const s3Key  = `config/qr-contact-${idx}.jpg`;
+  let   s3Url;
+  try { s3Url = await s3Upload(s3Key, file); }
+  catch (err) { console.error("S3 error:", err); return res.status(500).send("Upload failed"); }
+
+  // Update the config
+  try {
+    const Config = require('../models/config');
+    const config = await Config.findOne({ key: 'invoicePricing' });
+    if (config) {
+      const contacts = config.value.contacts || [];
+      while (contacts.length <= idx) contacts.push({ name: '', number: '', qrImageUrl: null });
+      contacts[idx].qrImageUrl = s3Url;
+      config.value = { ...config.value, contacts };
+      config.markModified('value');
+      await config.save();
+    }
+  } catch (err) { console.error("DB error:", err); }
+
+  res.json({ url: s3Url });
+});
+
 module.exports = router;

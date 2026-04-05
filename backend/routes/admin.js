@@ -6,6 +6,7 @@ const User     = require('../models/user');
 const Customer = require('../models/customer');
 const Job      = require('../models/job');
 const Config   = require('../models/config');
+const { Invoice, getNextInvoiceNumber } = require('../models/invoice');
 const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
 const axios    = require('axios');
@@ -520,6 +521,39 @@ router.put('/config/pricing', adminAuth, async (req, res) => {
     const updated = await Config.findOneAndUpdate(
       { key: 'pricing' },
       { key: 'pricing', value: req.body },
+      { upsert: true, new: true }
+    );
+    res.json({ success: true, value: updated.value });
+  } catch (err) { res.status(500).send("Server error"); }
+});
+
+// Invoice pricing config
+const DEFAULT_INVOICE_PRICING = {
+  slabs: [
+    { from: 1,  to: 5,    hatchback: 0, sedan: 0, suv: 0 },
+    { from: 6,  to: 10,   hatchback: 0, sedan: 0, suv: 0 },
+    { from: 11, to: null, hatchback: 0, sedan: 0, suv: 0 },
+  ],
+  interiorStandard: 0,
+  interiorPremium:  0,
+  contacts: [
+    { name: '', number: '', qrImageUrl: null },
+    { name: '', number: '', qrImageUrl: null },
+  ],
+};
+
+router.get('/config/invoicePricing', adminAuth, async (req, res) => {
+  try {
+    const doc = await Config.findOne({ key: 'invoicePricing' });
+    res.json(doc ? doc.value : DEFAULT_INVOICE_PRICING);
+  } catch (err) { res.status(500).send("Server error"); }
+});
+
+router.put('/config/invoicePricing', adminAuth, async (req, res) => {
+  try {
+    const updated = await Config.findOneAndUpdate(
+      { key: 'invoicePricing' },
+      { key: 'invoicePricing', value: req.body },
       { upsert: true, new: true }
     );
     res.json({ success: true, value: updated.value });
@@ -1379,6 +1413,235 @@ router.post('/jobs/:jobId/reassign', adminAuth, async (req, res) => {
     const populated = await Job.findById(newJob._id).populate('customerId');
     res.json({ originalJob: originalJob._id, newJob: populated });
   } catch (err) { console.error(err); res.status(500).send("Server error"); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INVOICE ENDPOINTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Helper: compute invoice for a customer for a given month
+async function computeCustomerInvoice(customer, jobs, pricing) {
+  const isBillable = (j) =>
+    j.status === 'Completed' &&
+    (!j.complaint?.raised ||
+      (j.complaint?.resolved === true && !j.complaint?.resolvedByReassign));
+
+  const billableJobs  = jobs.filter(isBillable);
+  const attempted     = jobs.length;
+  const cancelled     = jobs.filter(j => j.status === 'Cancelled').length;
+  const cleaned       = billableJobs.length;
+
+  const exteriorJobs  = billableJobs.filter(j => j.serviceType === 'Exterior');
+  const intStdJobs    = billableJobs.filter(j => j.serviceType === 'Interior Standard');
+  const intPremJobs   = billableJobs.filter(j => j.serviceType === 'Interior Premium');
+
+  const extCount      = exteriorJobs.length;
+  const lineItems     = [];
+  let   grandTotal    = 0;
+
+  // Exterior — find slab for extCount
+  if (extCount > 0) {
+    const slabs = pricing.slabs || [];
+    let pricePerWash = 0;
+    for (const slab of slabs) {
+      const inSlab = slab.to === null
+        ? extCount >= slab.from
+        : extCount >= slab.from && extCount <= slab.to;
+      if (inSlab) {
+        const carType = (customer.carType || 'Hatchback').toLowerCase();
+        pricePerWash = slab[carType] ?? slab['hatchback'] ?? 0;
+        break;
+      }
+    }
+    const extAmount = extCount * pricePerWash;
+    lineItems.push({ label: customer.carType || 'Hatchback', amount: extAmount });
+    grandTotal += extAmount;
+  }
+
+  // Interior Standard
+  if (intStdJobs.length > 0) {
+    const amt = intStdJobs.length * (pricing.interiorStandard ?? 0);
+    lineItems.push({ label: 'Interior Standard', amount: amt });
+    grandTotal += amt;
+  }
+
+  // Interior Premium
+  if (intPremJobs.length > 0) {
+    const amt = intPremJobs.length * (pricing.interiorPremium ?? 0);
+    lineItems.push({ label: 'Interior Premium', amount: amt });
+    grandTotal += amt;
+  }
+
+  return { attempted, cleaned, cancelled, lineItems, grandTotal };
+}
+
+// ── GET /admin/invoice/list?month=&year= ──────────────────────────────────────
+// Returns all customers with their invoice summary for the month
+router.get('/invoice/list', adminAuth, async (req, res) => {
+  try {
+    const now   = new Date();
+    const ist   = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
+    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
+
+    const from = new Date(`${year}-${String(month).padStart(2,'0')}-01T00:00:00+05:30`);
+    const to   = month === 12
+      ? new Date(`${year + 1}-01-01T00:00:00+05:30`)
+      : new Date(`${year}-${String(month + 1).padStart(2,'0')}-01T00:00:00+05:30`);
+
+    const configDoc = await Config.findOne({ key: 'invoicePricing' });
+    const pricing   = configDoc?.value || {};
+
+    const customers = await Customer.find({});
+
+    // Fetch all jobs for this month
+    const allJobs = await Job.find({
+      $or: [
+        { completedAt: { $gte: from, $lt: to } },
+        { cancelledAt: { $gte: from, $lt: to } },
+        { assignedDate: {
+            $gte: `${year}-${String(month).padStart(2,'0')}-01`,
+            $lt:  month === 12
+              ? `${year+1}-01-01`
+              : `${year}-${String(month+1).padStart(2,'0')}-01`,
+          }
+        },
+      ],
+    });
+
+    // Group jobs by customerId
+    const jobsByCustomer = {};
+    for (const job of allJobs) {
+      const cid = job.customerId.toString();
+      if (!jobsByCustomer[cid]) jobsByCustomer[cid] = [];
+      jobsByCustomer[cid].push(job);
+    }
+
+    // Fetch existing invoices for this month
+    const existingInvoices = await Invoice.find({ month, year });
+    const invoiceByCustomer = {};
+    for (const inv of existingInvoices) {
+      invoiceByCustomer[inv.customerId.toString()] = inv;
+    }
+
+    const result = [];
+    for (const customer of customers) {
+      const cid  = customer._id.toString();
+      const jobs = jobsByCustomer[cid] || [];
+      if (jobs.length === 0) continue; // no activity this month
+
+      const computed = await computeCustomerInvoice(customer, jobs, pricing);
+      const existing = invoiceByCustomer[cid];
+      const hasPaymentContact = !!(customer.paymentContact?.number);
+
+      result.push({
+        customerId:     cid,
+        customerName:   customer.customerName,
+        vehicleNumber:  customer.vehicleNumber,
+        carModel:       customer.carModel,
+        carType:        customer.carType,
+        customerPhone:  customer.phone,
+        paymentContact: customer.paymentContact || null,
+        hasPaymentContact,
+        ...computed,
+        invoiceId:      existing?._id || null,
+        invoiceNumber:  existing?.invoiceNumber || null,
+        shared:         existing?.shared || false,
+        sharedAt:       existing?.sharedAt || null,
+      });
+    }
+
+    res.json({ month, year, customers: result });
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── POST /admin/invoice/generate/:customerId?month=&year= ─────────────────────
+// Creates or returns existing invoice for customer for the month
+router.post('/invoice/generate/:customerId', adminAuth, async (req, res) => {
+  try {
+    const now   = new Date();
+    const ist   = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
+    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
+
+    const customer = await Customer.findById(req.params.customerId);
+    if (!customer) return res.status(404).send('Customer not found');
+    if (!customer.paymentContact?.number)
+      return res.status(400).send('Customer has no payment contact set');
+
+    const configDoc = await Config.findOne({ key: 'invoicePricing' });
+    const pricing   = configDoc?.value || {};
+
+    const from = new Date(`${year}-${String(month).padStart(2,'0')}-01T00:00:00+05:30`);
+    const to   = month === 12
+      ? new Date(`${year + 1}-01-01T00:00:00+05:30`)
+      : new Date(`${year}-${String(month + 1).padStart(2,'0')}-01T00:00:00+05:30`);
+
+    const jobs = await Job.find({
+      customerId: customer._id,
+      $or: [
+        { completedAt: { $gte: from, $lt: to } },
+        { cancelledAt: { $gte: from, $lt: to } },
+        { assignedDate: {
+            $gte: `${year}-${String(month).padStart(2,'0')}-01`,
+            $lt:  month === 12
+              ? `${year+1}-01-01`
+              : `${year}-${String(month+1).padStart(2,'0')}-01`,
+          }
+        },
+      ],
+    });
+
+    const computed = await computeCustomerInvoice(customer, jobs, pricing);
+
+    // Check if invoice already exists — update it (regenerate)
+    let invoice = await Invoice.findOne({
+      customerId: customer._id, month, year });
+
+    if (invoice) {
+      invoice.lineItems      = computed.lineItems;
+      invoice.grandTotal     = computed.grandTotal;
+      invoice.attempted      = computed.attempted;
+      invoice.cleaned        = computed.cleaned;
+      invoice.cancelled      = computed.cancelled;
+      invoice.paymentContact = customer.paymentContact;
+      invoice.customerName   = customer.customerName;
+      invoice.vehicleNumber  = customer.vehicleNumber;
+      invoice.carModel       = customer.carModel;
+      invoice.carType        = customer.carType;
+      invoice.customerPhone  = customer.phone || '';
+      await invoice.save();
+    } else {
+      const invoiceNumber = await getNextInvoiceNumber(month, year);
+      invoice = await Invoice.create({
+        invoiceNumber,
+        month, year,
+        customerId:    customer._id,
+        customerName:  customer.customerName,
+        vehicleNumber: customer.vehicleNumber,
+        carModel:      customer.carModel,
+        carType:       customer.carType,
+        customerPhone: customer.phone || '',
+        paymentContact: customer.paymentContact,
+        ...computed,
+      });
+    }
+
+    res.json(invoice);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── PUT /admin/invoice/:invoiceId/mark-shared ─────────────────────────────────
+router.put('/invoice/:invoiceId/mark-shared', adminAuth, async (req, res) => {
+  try {
+    const invoice = await Invoice.findByIdAndUpdate(
+      req.params.invoiceId,
+      { $set: { shared: true, sharedAt: new Date() } },
+      { new: true }
+    );
+    if (!invoice) return res.status(404).send('Invoice not found');
+    res.json(invoice);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
 
 module.exports = router;
