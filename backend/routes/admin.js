@@ -720,8 +720,12 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
     const attByDate = {};
     for (const r of attendanceRecords) attByDate[r.date] = r;
 
-    // Helper: is the day fully complete (towel soak done — route won't change)
+    // Helper: is the day safe to cache distance
+    // Past days are always final — cache regardless of towel soak
+    // Today: still require towel soak (jobs may still be added)
+    const todayStr = todayIST();
     const isDayComplete = (date) => {
+      if (date < todayStr) return true; // past day — always cache
       const r = attByDate[date];
       if (!r) return false;
       const isSat = new Date(date + 'T12:00:00Z').getUTCDay() === 6;

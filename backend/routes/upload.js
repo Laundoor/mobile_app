@@ -163,7 +163,16 @@ router.post('/', upload.single('image'), async (req, res) => {
       }
     } else if (photoType === 'after') {
       const afterLabel = label || `Photo ${job.images.after.length + 1}`;
-      job.images.after.push({ label: afterLabel, url: s3Url });
+      // Replace existing entry with same label (retake), otherwise push up to limit 8
+      const existingIdx = job.images.after.findIndex(p => p.label === afterLabel);
+      if (existingIdx !== -1) {
+        job.images.after[existingIdx].url = s3Url; // replace
+      } else if (job.images.after.length < 8) {
+        job.images.after.push({ label: afterLabel, url: s3Url });
+      } else {
+        // Already at 8 — silently ignore extra uploads
+        console.warn(`[upload] after photo limit reached for job ${jobId}`);
+      }
     } else if (photoType === 'interior_before') {
       const beforeLabel = label || `Photo ${job.images.interiorBefore.length + 1}`;
       // First interior_before photo acts as "start" — set beforeUploadedAt + active
@@ -175,10 +184,26 @@ router.post('/', upload.single('image'), async (req, res) => {
           });
         }
       }
-      job.images.interiorBefore.push({ label: beforeLabel, url: s3Url });
+      // Replace existing entry with same label (retake), otherwise push up to limit 8
+      const existingIdx = job.images.interiorBefore.findIndex(p => p.label === beforeLabel);
+      if (existingIdx !== -1) {
+        job.images.interiorBefore[existingIdx].url = s3Url; // replace
+      } else if (job.images.interiorBefore.length < 8) {
+        job.images.interiorBefore.push({ label: beforeLabel, url: s3Url });
+      } else {
+        console.warn(`[upload] interiorBefore limit reached for job ${jobId}`);
+      }
     } else if (photoType === 'interior_after') {
       const afterLabel = label || `Photo ${job.images.interiorAfter.length + 1}`;
-      job.images.interiorAfter.push({ label: afterLabel, url: s3Url });
+      // Replace existing entry with same label (retake), otherwise push up to limit 8
+      const existingIdx = job.images.interiorAfter.findIndex(p => p.label === afterLabel);
+      if (existingIdx !== -1) {
+        job.images.interiorAfter[existingIdx].url = s3Url; // replace
+      } else if (job.images.interiorAfter.length < 8) {
+        job.images.interiorAfter.push({ label: afterLabel, url: s3Url });
+      } else {
+        console.warn(`[upload] interiorAfter limit reached for job ${jobId}`);
+      }
     } else if (photoType === 'cancel') {
       job.cancelPhotoUrl = s3Url;
       // Employee showed up even though job was cancelled — mark active
