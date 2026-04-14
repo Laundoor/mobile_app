@@ -1539,23 +1539,70 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
       const hasPaymentContact = !!(customer.paymentContact?.number);
 
       result.push({
-        customerId:     cid,
-        customerName:   customer.customerName,
-        vehicleNumber:  customer.vehicleNumber,
-        carModel:       customer.carModel,
-        carType:        customer.carType,
-        customerPhone:  customer.phone,
-        paymentContact: customer.paymentContact || null,
+        customerId:        cid,
+        customerName:      customer.customerName,
+        vehicleNumber:     customer.vehicleNumber,
+        carModel:          customer.carModel,
+        carType:           customer.carType,
+        customerPhone:     customer.phone,
+        paymentContact:    customer.paymentContact || null,
         hasPaymentContact,
         ...computed,
-        invoiceId:      existing?._id || null,
-        invoiceNumber:  existing?.invoiceNumber || null,
-        shared:         existing?.shared || false,
-        sharedAt:       existing?.sharedAt || null,
+        invoiceId:         existing?._id || null,
+        invoiceNumber:     existing?.invoiceNumber || null,
+        shared:            existing?.shared || false,
+        sharedAt:          existing?.sharedAt || null,
+        paymentCollected:  existing?.paymentCollected || false,
+        collectedAt:       existing?.collectedAt || null,
+        adjustment:        existing?.adjustment || 0,
+        lineItems:         existing?.lineItems || computed.lineItems,
+        grandTotal:        existing?.grandTotal || computed.grandTotal,
       });
     }
 
     res.json({ month, year, customers: result });
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── GET /admin/invoice/metrics?month=&year= ───────────────────────────────────
+router.get('/invoice/metrics', adminAuth, async (req, res) => {
+  try {
+    const now   = new Date();
+    const ist   = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
+    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
+
+    const invoices = await Invoice.find({ month, year });
+
+    const totalRevenue   = invoices.reduce((s, i) => s + (i.grandTotal || 0), 0);
+    const totalCollected = invoices
+      .filter(i => i.paymentCollected)
+      .reduce((s, i) => s + (i.grandTotal || 0), 0);
+    const totalPending   = Math.round((totalRevenue - totalCollected) * 100) / 100;
+
+    // Per contact breakdown
+    const byContact = {};
+    for (const inv of invoices) {
+      const key  = inv.paymentContact?.number || 'Unknown';
+      const name = inv.paymentContact?.name   || 'Unknown';
+      if (!byContact[key]) byContact[key] = { name, invoiced: 0, collected: 0 };
+      byContact[key].invoiced  += inv.grandTotal || 0;
+      if (inv.paymentCollected)
+        byContact[key].collected += inv.grandTotal || 0;
+    }
+    // Round byContact values
+    for (const k of Object.keys(byContact)) {
+      byContact[k].invoiced  = Math.round(byContact[k].invoiced  * 100) / 100;
+      byContact[k].collected = Math.round(byContact[k].collected * 100) / 100;
+    }
+
+    res.json({
+      month, year,
+      totalRevenue:   Math.round(totalRevenue   * 100) / 100,
+      totalCollected: Math.round(totalCollected * 100) / 100,
+      totalPending,
+      byContact: Object.values(byContact),
+    });
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
 
@@ -1598,13 +1645,29 @@ router.post('/invoice/generate/:customerId', adminAuth, async (req, res) => {
 
     const computed = await computeCustomerInvoice(customer, jobs, pricing);
 
+    // Apply adjustment to exterior line item (never to interior)
+    const adjustment = parseFloat(req.body?.adjustment ?? 0) || 0;
+    let finalLineItems = computed.lineItems.map(i => ({ ...i }));
+    let finalTotal     = computed.grandTotal;
+    if (adjustment !== 0) {
+      // Find exterior line item by car type label
+      const extIdx = finalLineItems.findIndex(i =>
+        ['Hatchback','Sedan','SUV'].includes(i.label));
+      if (extIdx !== -1) {
+        finalLineItems[extIdx].amount =
+          Math.round((finalLineItems[extIdx].amount + adjustment) * 100) / 100;
+        finalTotal = Math.round(
+          finalLineItems.reduce((s, i) => s + i.amount, 0) * 100) / 100;
+      }
+    }
+
     // Check if invoice already exists — update it (regenerate)
     let invoice = await Invoice.findOne({
       customerId: customer._id, month, year });
 
     if (invoice) {
-      invoice.lineItems      = computed.lineItems;
-      invoice.grandTotal     = computed.grandTotal;
+      invoice.lineItems      = finalLineItems;
+      invoice.grandTotal     = finalTotal;
       invoice.attempted      = computed.attempted;
       invoice.cleaned        = computed.cleaned;
       invoice.cancelled      = computed.cancelled;
@@ -1614,6 +1677,7 @@ router.post('/invoice/generate/:customerId', adminAuth, async (req, res) => {
       invoice.carModel       = customer.carModel;
       invoice.carType        = customer.carType;
       invoice.customerPhone  = customer.phone || '';
+      invoice.adjustment     = adjustment;
       await invoice.save();
     } else {
       const invoiceNumber = await getNextInvoiceNumber(month, year);
@@ -1627,7 +1691,12 @@ router.post('/invoice/generate/:customerId', adminAuth, async (req, res) => {
         carType:       customer.carType,
         customerPhone: customer.phone || '',
         paymentContact: customer.paymentContact,
-        ...computed,
+        attempted:     computed.attempted,
+        cleaned:       computed.cleaned,
+        cancelled:     computed.cancelled,
+        lineItems:     finalLineItems,
+        grandTotal:    finalTotal,
+        adjustment,
       });
     }
 
@@ -1641,6 +1710,19 @@ router.put('/invoice/:invoiceId/mark-shared', adminAuth, async (req, res) => {
     const invoice = await Invoice.findByIdAndUpdate(
       req.params.invoiceId,
       { $set: { shared: true, sharedAt: new Date() } },
+      { new: true }
+    );
+    if (!invoice) return res.status(404).send('Invoice not found');
+    res.json(invoice);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── PUT /admin/invoice/:invoiceId/mark-collected ──────────────────────────────
+router.put('/invoice/:invoiceId/mark-collected', adminAuth, async (req, res) => {
+  try {
+    const invoice = await Invoice.findByIdAndUpdate(
+      req.params.invoiceId,
+      { $set: { paymentCollected: true, collectedAt: new Date() } },
       { new: true }
     );
     if (!invoice) return res.status(404).send('Invoice not found');

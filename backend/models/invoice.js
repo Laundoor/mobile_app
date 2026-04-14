@@ -40,6 +40,13 @@ const invoiceSchema = new mongoose.Schema({
   shared:   { type: Boolean, default: false },
   sharedAt: { type: Date, default: null },
 
+  // Payment collection
+  paymentCollected: { type: Boolean, default: false },
+  collectedAt:      { type: Date, default: null },
+
+  // Amount adjustment — added to exterior line item before sharing
+  adjustment: { type: Number, default: 0 },
+
 }, { timestamps: true });
 
 // Counter model for global invoice sequence
