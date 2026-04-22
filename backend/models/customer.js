@@ -24,6 +24,20 @@ const customerSchema = new mongoose.Schema({
     number:     { type: String, default: null },
     qrImageUrl: { type: String, default: null },
   },
+
+  // Per-customer invoice pricing override — null means use global config
+  customPricing: {
+    enabled:         { type: Boolean, default: false },
+    slabs: [{
+      from:      { type: Number },
+      to:        { type: Number, default: null },
+      hatchback: { type: Number },
+      sedan:     { type: Number },
+      suv:       { type: Number },
+    }],
+    interiorStandard: { type: Number, default: null },
+    interiorPremium:  { type: Number, default: null },
+  },
   phone:         { type: String, default: '' },
   carPhoto:      { type: String, default: null }, // S3 URL of car photo
   // Location for distance allowance calculation

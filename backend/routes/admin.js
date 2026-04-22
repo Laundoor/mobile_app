@@ -400,6 +400,20 @@ router.delete('/customers/:id', adminAuth, async (req, res) => {
   } catch (err) { res.status(500).send("Server error"); }
 });
 
+// ── PUT /admin/customers/:id/pricing — save/clear custom pricing ──────────────
+router.put('/customers/:id/pricing', adminAuth, async (req, res) => {
+  try {
+    const { enabled, slabs, interiorStandard, interiorPremium } = req.body;
+    const customer = await Customer.findByIdAndUpdate(
+      req.params.id,
+      { $set: { customPricing: { enabled: !!enabled, slabs: slabs || [], interiorStandard, interiorPremium } } },
+      { new: true }
+    );
+    if (!customer) return res.status(404).send("Customer not found");
+    res.json(customer);
+  } catch (err) { res.status(500).send("Server error"); }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // JOB ASSIGNMENT
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1424,7 +1438,11 @@ router.post('/jobs/:jobId/reassign', adminAuth, async (req, res) => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Helper: compute invoice for a customer for a given month
-async function computeCustomerInvoice(customer, jobs, pricing) {
+async function computeCustomerInvoice(customer, jobs, globalPricing) {
+  // Use customer custom pricing if enabled, else fall back to global
+  const pricing = (customer.customPricing?.enabled && customer.customPricing?.slabs?.length)
+    ? customer.customPricing
+    : globalPricing;
   const isBillable = (j) =>
     j.status === 'Completed' &&
     (!j.complaint?.raised ||
