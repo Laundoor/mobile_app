@@ -418,37 +418,32 @@ router.put('/customers/:id/pricing', adminAuth, async (req, res) => {
 router.get('/customers/:id/monthly-counts', adminAuth, async (req, res) => {
   try {
     const nowIST   = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
-    const curMonth = `${nowIST.getUTCFullYear()}-${String(nowIST.getUTCMonth() + 1).padStart(2, '0')}`;
+    const yyyy     = nowIST.getUTCFullYear();
+    const mm       = nowIST.getUTCMonth() + 1;
+    const curMonth = `${yyyy}-${String(mm).padStart(2, '0')}`;
+    const nextMonth = mm === 12
+      ? `${yyyy + 1}-01`
+      : `${yyyy}-${String(mm + 1).padStart(2, '0')}`;
 
-    const from = new Date(`${curMonth}-01T00:00:00+05:30`);
-    const mm   = nowIST.getUTCMonth() + 1;
-    const yyyy = nowIST.getUTCFullYear();
-    const to   = mm === 12
-      ? new Date(`${yyyy + 1}-01-01T00:00:00+05:30`)
-      : new Date(`${yyyy}-${String(mm + 1).padStart(2, '0')}-01T00:00:00+05:30`);
+    // Use assignedDate string range — always stored as YYYY-MM-DD IST, no timezone issues
+    const jobs = await Job.find({
+      customerId:   req.params.id,
+      assignedDate: { $gte: `${curMonth}-01`, $lt: `${nextMonth}-01` },
+    });
 
     const isBillable = (j) =>
       j.status === 'Completed' &&
       (!j.complaint?.raised ||
         (j.complaint?.resolved === true && !j.complaint?.resolvedByReassign));
 
-    const jobs = await Job.find({
-      customerId: req.params.id,
-      $or: [
-        { completedAt: { $gte: from, $lt: to } },
-        { cancelledAt: { $gte: from, $lt: to } },
-        { assignedDate: { $gte: curMonth + '-01', $lt: (mm === 12 ? `${yyyy+1}-01-01` : `${yyyy}-${String(mm+1).padStart(2,'0')}-01`) } },
-      ],
-    });
-
-    const billable  = jobs.filter(isBillable);
-    const exterior  = billable.filter(j => j.serviceType === 'Exterior').length;
-    const interior  = billable.filter(j =>
+    const billable = jobs.filter(isBillable);
+    const exterior = billable.filter(j => j.serviceType === 'Exterior').length;
+    const interior = billable.filter(j =>
         j.serviceType === 'Interior Standard' ||
         j.serviceType === 'Interior Premium').length;
 
     res.json({ exterior, interior, total: exterior + interior });
-  } catch (err) { res.status(500).send('Server error'); }
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
