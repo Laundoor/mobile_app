@@ -421,14 +421,16 @@ router.get('/customers/:id/monthly-counts', adminAuth, async (req, res) => {
     const yyyy     = nowIST.getUTCFullYear();
     const mm       = nowIST.getUTCMonth() + 1;
     const curMonth = `${yyyy}-${String(mm).padStart(2, '0')}`;
-    const nextMonth = mm === 12
-      ? `${yyyy + 1}-01`
-      : `${yyyy}-${String(mm + 1).padStart(2, '0')}`;
 
-    // Use assignedDate string range — always stored as YYYY-MM-DD IST, no timezone issues
-    const jobs = await Job.find({
-      customerId:   req.params.id,
-      assignedDate: { $gte: `${curMonth}-01`, $lt: `${nextMonth}-01` },
+    // Fetch ALL jobs for this customer then filter in JS
+    // avoids any string vs Date comparison issues with assignedDate
+    const allJobs = await Job.find({ customerId: req.params.id });
+
+    // Keep only jobs whose assignedDate falls in the current month
+    const monthJobs = allJobs.filter(j => {
+      if (!j.assignedDate) return false;
+      // assignedDate is stored as "YYYY-MM-DD" string
+      return j.assignedDate.startsWith(curMonth);
     });
 
     const isBillable = (j) =>
@@ -436,14 +438,20 @@ router.get('/customers/:id/monthly-counts', adminAuth, async (req, res) => {
       (!j.complaint?.raised ||
         (j.complaint?.resolved === true && !j.complaint?.resolvedByReassign));
 
-    const billable = jobs.filter(isBillable);
+    const billable = monthJobs.filter(isBillable);
     const exterior = billable.filter(j => j.serviceType === 'Exterior').length;
     const interior = billable.filter(j =>
         j.serviceType === 'Interior Standard' ||
         j.serviceType === 'Interior Premium').length;
 
+    console.log(`[monthly-counts] customer=${req.params.id} month=${curMonth} allJobs=${allJobs.length} monthJobs=${monthJobs.length} billable=${billable.length} ext=${exterior} int=${interior}`);
+    monthJobs.forEach(j => console.log(`  job: status=${j.status} type=${j.serviceType} date=${j.assignedDate} billable=${isBillable(j)}`));
+
     res.json({ exterior, interior, total: exterior + interior });
-  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+  } catch (err) {
+    console.error('[monthly-counts] error:', err);
+    res.status(500).send('Server error');
+  }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
