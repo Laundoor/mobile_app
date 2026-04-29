@@ -1546,34 +1546,25 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
     const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
     const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
 
-    const from = new Date(`${year}-${String(month).padStart(2,'0')}-01T00:00:00+05:30`);
-    const to   = month === 12
-      ? new Date(`${year + 1}-01-01T00:00:00+05:30`)
-      : new Date(`${year}-${String(month + 1).padStart(2,'0')}-01T00:00:00+05:30`);
+    const curMonth = `${year}-${String(month).padStart(2,'0')}`;
 
     const configDoc = await Config.findOne({ key: 'invoicePricing' });
     const pricing   = configDoc?.value || {};
-
     const customers = await Customer.find({});
 
-    // Fetch all jobs for this month
-    const allJobs = await Job.find({
-      $or: [
-        { completedAt: { $gte: from, $lt: to } },
-        { cancelledAt: { $gte: from, $lt: to } },
-        { assignedDate: {
-            $gte: `${year}-${String(month).padStart(2,'0')}-01`,
-            $lt:  month === 12
-              ? `${year+1}-01-01`
-              : `${year}-${String(month+1).padStart(2,'0')}-01`,
-          }
-        },
-      ],
+    // Fetch all jobs for this month using assignedDate — consistent with compute + generate
+    const allJobsRaw = await Job.find({
+      assignedDate: {
+        $gte: `${curMonth}-01`,
+        $lt:  month === 12
+          ? `${year+1}-01-01`
+          : `${year}-${String(month+1).padStart(2,'0')}-01`,
+      },
     });
 
     // Group jobs by customerId
     const jobsByCustomer = {};
-    for (const job of allJobs) {
+    for (const job of allJobsRaw) {
       const cid = job.customerId.toString();
       if (!jobsByCustomer[cid]) jobsByCustomer[cid] = [];
       jobsByCustomer[cid].push(job);
@@ -1612,9 +1603,14 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
         sharedAt:          existing?.sharedAt || null,
         paymentCollected:  existing?.paymentCollected || false,
         collectedAt:       existing?.collectedAt || null,
-        adjustment:        existing?.adjustment || 0,
-        lineItems:         existing?.lineItems || computed.lineItems,
-        grandTotal:        existing?.grandTotal || computed.grandTotal,
+        adjustment:        existing?.adjustment ?? 0,
+        lineItems:         existing?.lineItems?.length ? existing.lineItems : computed.lineItems,
+        grandTotal:        existing?.grandTotal ?? computed.grandTotal,
+        computedTotal:     computed.grandTotal, // raw pre-adjustment total, always fresh
+        // Show computed total on card if invoice not yet shared — so stale stored values don't mislead
+        displayTotal:      (existing?.shared || existing?.paymentCollected)
+          ? (existing?.grandTotal ?? computed.grandTotal)
+          : computed.grandTotal,
       });
     }
 
@@ -1664,6 +1660,31 @@ router.get('/invoice/metrics', adminAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
 
+// ── GET /admin/invoice/compute/:customerId?month=&year= ───────────────────────
+// Returns fresh computed total for a customer — always current, never cached
+router.get('/invoice/compute/:customerId', adminAuth, async (req, res) => {
+  try {
+    const now   = new Date();
+    const ist   = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
+    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
+
+    const customer = await Customer.findById(req.params.customerId);
+    if (!customer) return res.status(404).send('Customer not found');
+
+    const configDoc = await Config.findOne({ key: 'invoicePricing' });
+    const pricing   = configDoc?.value || {};
+
+    const curMonth = `${year}-${String(month).padStart(2,'0')}`;
+    const allJobs  = await Job.find({ customerId: customer._id });
+    const jobs     = allJobs.filter(j =>
+        j.assignedDate && j.assignedDate.startsWith(curMonth));
+
+    const computed = await computeCustomerInvoice(customer, jobs, pricing);
+    res.json({ computedTotal: computed.grandTotal, lineItems: computed.lineItems });
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
 // ── POST /admin/invoice/generate/:customerId?month=&year= ─────────────────────
 // Creates or returns existing invoice for customer for the month
 router.post('/invoice/generate/:customerId', adminAuth, async (req, res) => {
@@ -1681,25 +1702,10 @@ router.post('/invoice/generate/:customerId', adminAuth, async (req, res) => {
     const configDoc = await Config.findOne({ key: 'invoicePricing' });
     const pricing   = configDoc?.value || {};
 
-    const from = new Date(`${year}-${String(month).padStart(2,'0')}-01T00:00:00+05:30`);
-    const to   = month === 12
-      ? new Date(`${year + 1}-01-01T00:00:00+05:30`)
-      : new Date(`${year}-${String(month + 1).padStart(2,'0')}-01T00:00:00+05:30`);
-
-    const jobs = await Job.find({
-      customerId: customer._id,
-      $or: [
-        { completedAt: { $gte: from, $lt: to } },
-        { cancelledAt: { $gte: from, $lt: to } },
-        { assignedDate: {
-            $gte: `${year}-${String(month).padStart(2,'0')}-01`,
-            $lt:  month === 12
-              ? `${year+1}-01-01`
-              : `${year}-${String(month+1).padStart(2,'0')}-01`,
-          }
-        },
-      ],
-    });
+    const curMonth = `${year}-${String(month).padStart(2,'0')}`;
+    const allJobs  = await Job.find({ customerId: customer._id });
+    const jobs     = allJobs.filter(j =>
+        j.assignedDate && j.assignedDate.startsWith(curMonth));
 
     const computed = await computeCustomerInvoice(customer, jobs, pricing);
 
