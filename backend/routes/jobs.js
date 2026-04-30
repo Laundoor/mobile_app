@@ -209,6 +209,9 @@ router.put('/:id/status', async (req, res) => {
     const job = await Job.findById(req.params.id);
     if (!job) return res.status(404).send("Job not found");
 
+    // Idempotency guard — if already in this status, return as-is without side effects
+    if (job.status === status) return res.json(job);
+
     // Block completion of interior jobs unless all 8 after photos uploaded
     if (status === 'Completed') {
       const isInterior = job.serviceType === 'Interior Standard' ||

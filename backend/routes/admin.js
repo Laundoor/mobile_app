@@ -400,7 +400,34 @@ router.delete('/customers/:id', adminAuth, async (req, res) => {
   } catch (err) { res.status(500).send("Server error"); }
 });
 
-// ── PUT /admin/customers/:id/pricing — save/clear custom pricing ──────────────
+// ── POST /admin/customers/:id/repair-count — recalculate serviceCount from actual jobs ──
+router.post('/customers/:id/repair-count', adminAuth, async (req, res) => {
+  try {
+    const nowIST   = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    const curMonth = `${nowIST.getUTCFullYear()}-${String(nowIST.getUTCMonth() + 1).padStart(2, '0')}`;
+
+    const allJobs = await Job.find({ customerId: req.params.id });
+    const monthJobs = allJobs.filter(j =>
+        j.assignedDate && j.assignedDate.startsWith(curMonth));
+
+    // Count only billable completed jobs this month
+    const billableCount = monthJobs.filter(j =>
+        j.status === 'Completed' &&
+        (!j.complaint?.raised ||
+          (j.complaint?.resolved === true &&
+           !j.complaint?.resolvedByReassign))).length;
+
+    const customer = await Customer.findByIdAndUpdate(
+      req.params.id,
+      { $set: { serviceCount: billableCount, lastServiceMonth: curMonth } },
+      { new: true }
+    );
+    if (!customer) return res.status(404).send('Customer not found');
+
+    console.log(`[repair-count] customer=${req.params.id} corrected serviceCount to ${billableCount}`);
+    res.json({ customerId: req.params.id, correctedCount: billableCount });
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
 router.put('/customers/:id/pricing', adminAuth, async (req, res) => {
   try {
     const { enabled, slabs, interiorStandard, interiorPremium } = req.body;
