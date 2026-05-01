@@ -1580,7 +1580,8 @@ async function computeCustomerInvoice(customer, jobs, globalPricing) {
     attempted, cleaned, cancelled,
     extAttempted, extCleaned, extCancelled,
     intAttempted, intCleaned, intCancelled,
-    lineItems, grandTotal,
+    lineItems: lineItems.map(i => ({ ...i, amount: Math.round(i.amount) })),
+    grandTotal: Math.round(grandTotal),
   };
 }
 
@@ -1759,16 +1760,15 @@ router.post('/invoice/generate/:customerId', adminAuth, async (req, res) => {
     // Apply adjustment to exterior line item (never to interior)
     const adjustment = parseFloat(req.body?.adjustment ?? 0) || 0;
     let finalLineItems = computed.lineItems.map(i => ({ ...i }));
-    let finalTotal     = computed.grandTotal;
+    let finalTotal     = computed.grandTotal; // already rounded by computeCustomerInvoice
     if (adjustment !== 0) {
       // Find exterior line item by car type label
       const extIdx = finalLineItems.findIndex(i =>
         ['Hatchback','Sedan','SUV'].includes(i.label));
       if (extIdx !== -1) {
-        finalLineItems[extIdx].amount =
-          Math.round((finalLineItems[extIdx].amount + adjustment) * 100) / 100;
-        finalTotal = Math.round(
-          finalLineItems.reduce((s, i) => s + i.amount, 0) * 100) / 100;
+        finalLineItems[extIdx].amount = Math.round(
+            finalLineItems[extIdx].amount + adjustment);
+        finalTotal = finalLineItems.reduce((s, i) => s + i.amount, 0);
       }
     }
 
