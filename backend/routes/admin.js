@@ -1516,9 +1516,24 @@ async function computeCustomerInvoice(customer, jobs, globalPricing) {
       (j.complaint?.resolved === true && !j.complaint?.resolvedByReassign));
 
   const billableJobs  = jobs.filter(isBillable);
+
+  // Legacy totals
   const attempted     = jobs.length;
   const cancelled     = jobs.filter(j => j.status === 'Cancelled').length;
   const cleaned       = billableJobs.length;
+
+  // Split stats — exterior
+  const extAllJobs    = jobs.filter(j => j.serviceType === 'Exterior');
+  const extAttempted  = extAllJobs.length;
+  const extCleaned    = extAllJobs.filter(isBillable).length;
+  const extCancelled  = extAllJobs.filter(j => j.status === 'Cancelled').length;
+
+  // Split stats — interior
+  const intAllJobs    = jobs.filter(j =>
+      j.serviceType === 'Interior Standard' || j.serviceType === 'Interior Premium');
+  const intAttempted  = intAllJobs.length;
+  const intCleaned    = intAllJobs.filter(isBillable).length;
+  const intCancelled  = intAllJobs.filter(j => j.status === 'Cancelled').length;
 
   const exteriorJobs  = billableJobs.filter(j => j.serviceType === 'Exterior');
   const intStdJobs    = billableJobs.filter(j => j.serviceType === 'Interior Standard');
@@ -1561,7 +1576,12 @@ async function computeCustomerInvoice(customer, jobs, globalPricing) {
     grandTotal += amt;
   }
 
-  return { attempted, cleaned, cancelled, lineItems, grandTotal };
+  return {
+    attempted, cleaned, cancelled,
+    extAttempted, extCleaned, extCancelled,
+    intAttempted, intCleaned, intCancelled,
+    lineItems, grandTotal,
+  };
 }
 
 // ── GET /admin/invoice/list?month=&year= ──────────────────────────────────────
@@ -1762,6 +1782,12 @@ router.post('/invoice/generate/:customerId', adminAuth, async (req, res) => {
       invoice.attempted      = computed.attempted;
       invoice.cleaned        = computed.cleaned;
       invoice.cancelled      = computed.cancelled;
+      invoice.extAttempted   = computed.extAttempted;
+      invoice.extCleaned     = computed.extCleaned;
+      invoice.extCancelled   = computed.extCancelled;
+      invoice.intAttempted   = computed.intAttempted;
+      invoice.intCleaned     = computed.intCleaned;
+      invoice.intCancelled   = computed.intCancelled;
       invoice.paymentContact = customer.paymentContact;
       invoice.customerName   = customer.customerName;
       invoice.vehicleNumber  = customer.vehicleNumber;
@@ -1785,6 +1811,12 @@ router.post('/invoice/generate/:customerId', adminAuth, async (req, res) => {
         attempted:     computed.attempted,
         cleaned:       computed.cleaned,
         cancelled:     computed.cancelled,
+        extAttempted:  computed.extAttempted,
+        extCleaned:    computed.extCleaned,
+        extCancelled:  computed.extCancelled,
+        intAttempted:  computed.intAttempted,
+        intCleaned:    computed.intCleaned,
+        intCancelled:  computed.intCancelled,
         lineItems:     finalLineItems,
         grandTotal:    finalTotal,
         adjustment,

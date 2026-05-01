@@ -28,6 +28,16 @@ const invoiceSchema = new mongoose.Schema({
   cleaned:   { type: Number, default: 0 },
   cancelled: { type: Number, default: 0 },
 
+  // Split stats — exterior
+  extAttempted: { type: Number, default: 0 },
+  extCleaned:   { type: Number, default: 0 },
+  extCancelled: { type: Number, default: 0 },
+
+  // Split stats — interior
+  intAttempted: { type: Number, default: 0 },
+  intCleaned:   { type: Number, default: 0 },
+  intCancelled: { type: Number, default: 0 },
+
   // Line items — e.g. [{ label: 'Hatchback', amount: 1960 }, { label: 'Interior Standard', amount: 100 }]
   lineItems: [{
     label:  { type: String },
