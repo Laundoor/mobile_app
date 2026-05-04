@@ -25,6 +25,13 @@ const customerSchema = new mongoose.Schema({
     qrImageUrl: { type: String, default: null },
   },
 
+  // Linked customer for combined invoice (two cars, same owner)
+  linkedCustomerId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Customer',
+    default: null,
+  },
+
   // Per-customer invoice pricing override — null means use global config
   customPricing: {
     enabled:         { type: Boolean, default: false },

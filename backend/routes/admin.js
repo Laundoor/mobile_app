@@ -7,6 +7,7 @@ const Customer = require('../models/customer');
 const Job      = require('../models/job');
 const Config   = require('../models/config');
 const { Invoice, getNextInvoiceNumber } = require('../models/invoice');
+const SalarySlip = require('../models/salary_slip');
 const bcrypt   = require('bcryptjs');
 const jwt      = require('jsonwebtoken');
 const axios    = require('axios');
@@ -1850,6 +1851,255 @@ router.put('/invoice/:invoiceId/mark-collected', adminAuth, async (req, res) => 
     );
     if (!invoice) return res.status(404).send('Invoice not found');
     res.json(invoice);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// COMBINED INVOICE
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── PUT /admin/customers/:id/link — link two customers for combined invoice ──
+router.put('/customers/:id/link', adminAuth, async (req, res) => {
+  try {
+    const { linkedCustomerId } = req.body;
+
+    // Link A → B
+    await Customer.findByIdAndUpdate(req.params.id,
+      { linkedCustomerId: linkedCustomerId || null });
+
+    // Link B → A (bidirectional) or clear if unlinking
+    if (linkedCustomerId) {
+      await Customer.findByIdAndUpdate(linkedCustomerId,
+        { linkedCustomerId: req.params.id });
+    } else {
+      // Unlinking — find the old linked customer and clear their link too
+      const cust = await Customer.findById(req.params.id);
+      if (cust?.linkedCustomerId) {
+        await Customer.findByIdAndUpdate(cust.linkedCustomerId,
+          { linkedCustomerId: null });
+      }
+    }
+
+    const updated = await Customer.findById(req.params.id);
+    res.json(updated);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── GET /admin/invoice/compute-combined/:customerId ───────────────────────────
+router.get('/invoice/compute-combined/:customerId', adminAuth, async (req, res) => {
+  try {
+    const now   = new Date();
+    const ist   = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
+    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
+
+    const custA = await Customer.findById(req.params.customerId);
+    if (!custA) return res.status(404).send('Customer not found');
+    if (!custA.linkedCustomerId) return res.status(400).send('No linked customer');
+
+    const custB = await Customer.findById(custA.linkedCustomerId);
+    if (!custB) return res.status(404).send('Linked customer not found');
+
+    const configDoc = await Config.findOne({ key: 'invoicePricing' });
+    const pricing   = configDoc?.value || {};
+    const curMonth  = `${year}-${String(month).padStart(2,'0')}`;
+
+    const getJobs = async (cust) => {
+      const all = await Job.find({ customerId: cust._id });
+      return all.filter(j => j.assignedDate && j.assignedDate.startsWith(curMonth));
+    };
+
+    const jobsA = await getJobs(custA);
+    const jobsB = await getJobs(custB);
+    const compA = await computeCustomerInvoice(custA, jobsA, pricing);
+    const compB = await computeCustomerInvoice(custB, jobsB, pricing);
+
+    res.json({
+      customerA: { id: custA._id, name: custA.customerName, computed: compA },
+      customerB: { id: custB._id, name: custB.customerName, computed: compB },
+      subtotal:  compA.grandTotal + compB.grandTotal,
+    });
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── POST /admin/invoice/generate-combined/:customerId ─────────────────────────
+router.post('/invoice/generate-combined/:customerId', adminAuth, async (req, res) => {
+  try {
+    const now   = new Date();
+    const ist   = new Date(now.getTime() + 5.5 * 60 * 60 * 1000);
+    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
+    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
+
+    const { discountFlat = 0, discountPct = 0, discountReason = '' } = req.body;
+
+    const custA = await Customer.findById(req.params.customerId);
+    if (!custA) return res.status(404).send('Customer not found');
+    if (!custA.linkedCustomerId) return res.status(400).send('No linked customer');
+    if (!custA.paymentContact?.number)
+      return res.status(400).send('Customer has no payment contact');
+
+    const custB = await Customer.findById(custA.linkedCustomerId);
+    if (!custB) return res.status(404).send('Linked customer not found');
+
+    const configDoc = await Config.findOne({ key: 'invoicePricing' });
+    const pricing   = configDoc?.value || {};
+    const curMonth  = `${year}-${String(month).padStart(2,'0')}`;
+
+    const getJobs = async (cust) => {
+      const all = await Job.find({ customerId: cust._id });
+      return all.filter(j => j.assignedDate && j.assignedDate.startsWith(curMonth));
+    };
+
+    const jobsA = await getJobs(custA);
+    const jobsB = await getJobs(custB);
+    const compA = await computeCustomerInvoice(custA, jobsA, pricing);
+    const compB = await computeCustomerInvoice(custB, jobsB, pricing);
+
+    // Build combined line items — prefix each with customer name
+    const nameA = custA.customerName.split('-')[0].trim();
+    const nameB = custB.customerName.split('-')[0].trim();
+    const carA  = custA.customerName.includes('-')
+      ? custA.customerName.split('-').slice(1).join('-').trim() : custA.carModel;
+    const carB  = custB.customerName.includes('-')
+      ? custB.customerName.split('-').slice(1).join('-').trim() : custB.carModel;
+
+    const lineItemsA = compA.lineItems.map(i => ({
+      label: i.label, amount: i.amount,
+      car: `${nameA} — ${carA}`,
+    }));
+    const lineItemsB = compB.lineItems.map(i => ({
+      label: i.label, amount: i.amount,
+      car: `${nameB} — ${carB}`,
+    }));
+    const allLineItems = [...lineItemsA, ...lineItemsB];
+
+    const subtotal = compA.grandTotal + compB.grandTotal;
+    const pctAmt   = Math.round(subtotal * (discountPct / 100));
+    const flatAmt  = Math.round(discountFlat);
+    const discountAmount = pctAmt + flatAmt;
+    const grandTotal = subtotal - discountAmount;
+
+    // Check for existing combined invoice
+    let invoice = await Invoice.findOne({
+      customerId: custA._id, month, year, isCombined: true });
+
+    const invoiceData = {
+      isCombined:         true,
+      linkedCustomerId:   custB._id,
+      linkedCustomerName: custB.customerName,
+      lineItems:          allLineItems,
+      grandTotal,
+      attempted:          compA.attempted + compB.attempted,
+      cleaned:            compA.cleaned   + compB.cleaned,
+      cancelled:          compA.cancelled + compB.cancelled,
+      extAttempted:       compA.extAttempted + compB.extAttempted,
+      extCleaned:         compA.extCleaned   + compB.extCleaned,
+      extCancelled:       compA.extCancelled + compB.extCancelled,
+      intAttempted:       compA.intAttempted + compB.intAttempted,
+      intCleaned:         compA.intCleaned   + compB.intCleaned,
+      intCancelled:       compA.intCancelled + compB.intCancelled,
+      discountFlat:       flatAmt,
+      discountPct,
+      discountReason,
+      discountAmount,
+      paymentContact:     custA.paymentContact,
+      customerName:       custA.customerName,
+      vehicleNumber:      custA.vehicleNumber,
+      carModel:           custA.carModel,
+      carType:            custA.carType,
+      customerPhone:      custA.phone || '',
+    };
+
+    if (invoice) {
+      Object.assign(invoice, invoiceData);
+      await invoice.save();
+    } else {
+      const invoiceNumber = await getNextInvoiceNumber(month, year);
+      invoice = await Invoice.create({
+        invoiceNumber, month, year,
+        customerId: custA._id,
+        ...invoiceData,
+      });
+    }
+
+    res.json(invoice);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SALARY SLIP
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── GET /admin/salary-slip/:employeeId?month=&year= ───────────────────────────
+router.get('/salary-slip/:employeeId', adminAuth, async (req, res) => {
+  try {
+    const ist   = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
+    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
+
+    const slip = await SalarySlip.findOne({
+      employeeId: req.params.employeeId, month, year });
+    res.json(slip || null);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── POST /admin/salary-slip/:employeeId — create/update salary slip ───────────
+router.post('/salary-slip/:employeeId', adminAuth, async (req, res) => {
+  try {
+    const ist   = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
+    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
+
+    const {
+      baseSalary, distanceAllowance, dailyIncentive,
+      salesIncentive, employeeReferral, bonus, deductions,
+      employeeName, employeePhone, joiningDate,
+    } = req.body;
+
+    const computedTotal = (baseSalary || 0) +
+        (distanceAllowance || 0) + (dailyIncentive || 0);
+
+    const sumItems = (arr) => (arr || []).reduce((s, i) => s + (i.amount || 0), 0);
+    const netTotal = computedTotal +
+        sumItems(salesIncentive) +
+        sumItems(employeeReferral) +
+        sumItems(bonus) -
+        sumItems(deductions);
+
+    let slip = await SalarySlip.findOne({
+      employeeId: req.params.employeeId, month, year });
+
+    const slipData = {
+      employeeName, employeePhone, joiningDate,
+      baseSalary, distanceAllowance, dailyIncentive,
+      computedTotal, salesIncentive, employeeReferral,
+      bonus, deductions, netTotal,
+    };
+
+    if (slip) {
+      Object.assign(slip, slipData);
+      await slip.save();
+    } else {
+      slip = await SalarySlip.create({
+        employeeId: req.params.employeeId,
+        month, year, ...slipData,
+      });
+    }
+
+    res.json(slip);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── PUT /admin/salary-slip/:slipId/mark-shared ────────────────────────────────
+router.put('/salary-slip/:slipId/mark-shared', adminAuth, async (req, res) => {
+  try {
+    const slip = await SalarySlip.findByIdAndUpdate(
+      req.params.slipId,
+      { $set: { shared: true, sharedAt: new Date() } },
+      { new: true }
+    );
+    if (!slip) return res.status(404).send('Slip not found');
+    res.json(slip);
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
 

@@ -57,6 +57,15 @@ const invoiceSchema = new mongoose.Schema({
   // Amount adjustment — added to exterior line item before sharing
   adjustment: { type: Number, default: 0 },
 
+  // Combined invoice fields — null/false for regular invoices
+  isCombined:        { type: Boolean, default: false },
+  linkedCustomerId:  { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null },
+  linkedCustomerName:{ type: String, default: null }, // snapshot
+  discountFlat:      { type: Number, default: 0 },
+  discountPct:       { type: Number, default: 0 },   // percentage e.g. 5 = 5%
+  discountReason:    { type: String, default: null },
+  discountAmount:    { type: Number, default: 0 },   // computed total discount saved
+
 }, { timestamps: true });
 
 // Counter model for global invoice sequence
