@@ -1645,6 +1645,7 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
         customerPhone:     customer.phone,
         paymentContact:    customer.paymentContact || null,
         hasPaymentContact,
+        linkedCustomerId:  customer.linkedCustomerId || null,
         ...computed,
         invoiceId:         existing?._id || null,
         invoiceNumber:     existing?.invoiceNumber || null,
