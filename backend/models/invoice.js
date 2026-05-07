@@ -58,13 +58,29 @@ const invoiceSchema = new mongoose.Schema({
   adjustment: { type: Number, default: 0 },
 
   // Combined invoice fields — null/false for regular invoices
-  isCombined:        { type: Boolean, default: false },
-  linkedCustomerId:  { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null },
-  linkedCustomerName:{ type: String, default: null }, // snapshot
-  discountFlat:      { type: Number, default: 0 },
-  discountPct:       { type: Number, default: 0 },   // percentage e.g. 5 = 5%
-  discountReason:    { type: String, default: null },
-  discountAmount:    { type: Number, default: 0 },   // computed total discount saved
+  isCombined:          { type: Boolean, default: false },
+  linkedCustomerId:    { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null },
+  linkedCustomerName:  { type: String, default: null },
+  linkedVehicleNumber: { type: String, default: null },
+  linkedCarModel:      { type: String, default: null },
+  linkedCarType:       { type: String, default: null },
+  discountFlat:        { type: Number, default: 0 },
+  discountPct:         { type: Number, default: 0 },
+  discountReason:      { type: String, default: null },
+  discountAmount:      { type: Number, default: 0 },
+  // Per-car stats — a = primary customer, b = linked customer
+  aExtAttempted: { type: Number, default: 0 },
+  aExtCleaned:   { type: Number, default: 0 },
+  aExtCancelled: { type: Number, default: 0 },
+  aIntAttempted: { type: Number, default: 0 },
+  aIntCleaned:   { type: Number, default: 0 },
+  aIntCancelled: { type: Number, default: 0 },
+  bExtAttempted: { type: Number, default: 0 },
+  bExtCleaned:   { type: Number, default: 0 },
+  bExtCancelled: { type: Number, default: 0 },
+  bIntAttempted: { type: Number, default: 0 },
+  bIntCleaned:   { type: Number, default: 0 },
+  bIntCancelled: { type: Number, default: 0 },
 
 }, { timestamps: true });
 

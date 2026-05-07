@@ -1931,7 +1931,7 @@ router.post('/invoice/generate-combined/:customerId', adminAuth, async (req, res
     const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
     const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
 
-    const { discountFlat = 0, discountPct = 0, discountReason = '' } = req.body;
+    const { discountFlat = 0, discountPct = 0, discountReason = '', adjustment = 0 } = req.body;
 
     const custA = await Customer.findById(req.params.customerId);
     if (!custA) return res.status(404).send('Customer not found');
@@ -1974,7 +1974,15 @@ router.post('/invoice/generate-combined/:customerId', adminAuth, async (req, res
     }));
     const allLineItems = [...lineItemsA, ...lineItemsB];
 
-    const subtotal = compA.grandTotal + compB.grandTotal;
+    // Apply adjustment to first exterior line item (same as individual)
+    const adjAmt = Math.round(adjustment || 0);
+    if (adjAmt !== 0) {
+      const extIdx = allLineItems.findIndex(i =>
+        ['Hatchback','Sedan','SUV'].includes(i.label));
+      if (extIdx !== -1) allLineItems[extIdx].amount += adjAmt;
+    }
+
+    const subtotal = compA.grandTotal + compB.grandTotal + adjAmt;
     const pctAmt   = Math.round(subtotal * (discountPct / 100));
     const flatAmt  = Math.round(discountFlat);
     const discountAmount = pctAmt + flatAmt;
@@ -1988,17 +1996,29 @@ router.post('/invoice/generate-combined/:customerId', adminAuth, async (req, res
       isCombined:         true,
       linkedCustomerId:   custB._id,
       linkedCustomerName: custB.customerName,
+      linkedVehicleNumber: custB.vehicleNumber,
+      linkedCarModel:     custB.carModel,
+      linkedCarType:      custB.carType,
       lineItems:          allLineItems,
       grandTotal,
+      // Legacy totals
       attempted:          compA.attempted + compB.attempted,
       cleaned:            compA.cleaned   + compB.cleaned,
       cancelled:          compA.cancelled + compB.cancelled,
-      extAttempted:       compA.extAttempted + compB.extAttempted,
-      extCleaned:         compA.extCleaned   + compB.extCleaned,
-      extCancelled:       compA.extCancelled + compB.extCancelled,
-      intAttempted:       compA.intAttempted + compB.intAttempted,
-      intCleaned:         compA.intCleaned   + compB.intCleaned,
-      intCancelled:       compA.intCancelled + compB.intCancelled,
+      // Per-car stats — Car A
+      aExtAttempted:      compA.extAttempted,
+      aExtCleaned:        compA.extCleaned,
+      aExtCancelled:      compA.extCancelled,
+      aIntAttempted:      compA.intAttempted,
+      aIntCleaned:        compA.intCleaned,
+      aIntCancelled:      compA.intCancelled,
+      // Per-car stats — Car B
+      bExtAttempted:      compB.extAttempted,
+      bExtCleaned:        compB.extCleaned,
+      bExtCancelled:      compB.extCancelled,
+      bIntAttempted:      compB.intAttempted,
+      bIntCleaned:        compB.intCleaned,
+      bIntCancelled:      compB.intCancelled,
       discountFlat:       flatAmt,
       discountPct,
       discountReason,
