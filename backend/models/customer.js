@@ -25,12 +25,9 @@ const customerSchema = new mongoose.Schema({
     qrImageUrl: { type: String, default: null },
   },
 
-  // Linked customer for combined invoice (two cars, same owner)
-  linkedCustomerId: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Customer',
-    default: null,
-  },
+  // Car group — customers with same carGroupId are billed together
+  // Replaces old linkedCustomerId (two-car only) with N-car group support
+  carGroupId: { type: String, default: null },
 
   // Per-customer invoice pricing override — null means use global config
   customPricing: {

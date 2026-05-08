@@ -57,18 +57,26 @@ const invoiceSchema = new mongoose.Schema({
   // Amount adjustment — added to exterior line item before sharing
   adjustment: { type: Number, default: 0 },
 
-  // Combined invoice fields — null/false for regular invoices
-  isCombined:          { type: Boolean, default: false },
+  // Combined invoice fields
+  isCombined:   { type: Boolean, default: false },
+  carGroupId:   { type: String,  default: null },
+  discountFlat: { type: Number,  default: 0 },
+  discountPct:  { type: Number,  default: 0 },
+  discountReason: { type: String, default: null },
+  discountAmount: { type: Number, default: 0 },
+
+  // Per-car data for combined invoices — array of car stats snapshots
+  // Each entry: { customerId, customerName, vehicleNumber, carModel, carType,
+  //               interiorType, extAttempted, extCleaned, extCancelled,
+  //               intAttempted, intCleaned, intCancelled }
+  carStats: [{ type: mongoose.Schema.Types.Mixed }],
+
+  // Keep legacy fields for backward compat with existing 2-car invoices
   linkedCustomerId:    { type: mongoose.Schema.Types.ObjectId, ref: 'Customer', default: null },
   linkedCustomerName:  { type: String, default: null },
   linkedVehicleNumber: { type: String, default: null },
   linkedCarModel:      { type: String, default: null },
   linkedCarType:       { type: String, default: null },
-  discountFlat:        { type: Number, default: 0 },
-  discountPct:         { type: Number, default: 0 },
-  discountReason:      { type: String, default: null },
-  discountAmount:      { type: Number, default: 0 },
-  // Per-car stats — a = primary customer, b = linked customer
   aExtAttempted: { type: Number, default: 0 },
   aExtCleaned:   { type: Number, default: 0 },
   aExtCancelled: { type: Number, default: 0 },
@@ -81,6 +89,8 @@ const invoiceSchema = new mongoose.Schema({
   bIntAttempted: { type: Number, default: 0 },
   bIntCleaned:   { type: Number, default: 0 },
   bIntCancelled: { type: Number, default: 0 },
+  aInteriorType: { type: String, default: null },
+  bInteriorType: { type: String, default: null },
 
 }, { timestamps: true });
 

@@ -1587,7 +1587,7 @@ async function computeCustomerInvoice(customer, jobs, globalPricing) {
 }
 
 // ── GET /admin/invoice/list?month=&year= ──────────────────────────────────────
-// Returns all customers with their invoice summary for the month
+// Returns customers with invoice summary. Car groups appear as one combined card.
 router.get('/invoice/list', adminAuth, async (req, res) => {
   try {
     const now   = new Date();
@@ -1601,7 +1601,6 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
     const pricing   = configDoc?.value || {};
     const customers = await Customer.find({});
 
-    // Fetch all jobs for this month using assignedDate — consistent with compute + generate
     const allJobsRaw = await Job.find({
       assignedDate: {
         $gte: `${curMonth}-01`,
@@ -1611,7 +1610,6 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
       },
     });
 
-    // Group jobs by customerId
     const jobsByCustomer = {};
     for (const job of allJobsRaw) {
       const cid = job.customerId.toString();
@@ -1619,48 +1617,115 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
       jobsByCustomer[cid].push(job);
     }
 
-    // Fetch existing invoices for this month
     const existingInvoices = await Invoice.find({ month, year });
     const invoiceByCustomer = {};
     for (const inv of existingInvoices) {
       invoiceByCustomer[inv.customerId.toString()] = inv;
     }
 
+    // Track which groupIds we've already added to avoid duplicate group cards
+    const processedGroups = new Set();
     const result = [];
+
     for (const customer of customers) {
       const cid  = customer._id.toString();
       const jobs = jobsByCustomer[cid] || [];
-      if (jobs.length === 0) continue; // no activity this month
+
+      // If customer is in a group, handle as combined card
+      if (customer.carGroupId) {
+        if (processedGroups.has(customer.carGroupId)) continue;
+        processedGroups.add(customer.carGroupId);
+
+        // Find all group members
+        const members = customers.filter(c =>
+            c.carGroupId === customer.carGroupId);
+
+        // Check if any member has activity this month
+        const hasActivity = members.some(m =>
+            (jobsByCustomer[m._id.toString()] || []).length > 0);
+        if (!hasActivity) continue;
+
+        // Use first member with payment contact as the primary
+        const primary = members.find(m => m.paymentContact?.number)
+            || members[0];
+        const primaryCid = primary._id.toString();
+
+        // Find existing combined invoice
+        const existing = existingInvoices.find(inv =>
+            inv.isCombined && inv.carGroupId === customer.carGroupId);
+
+        // Compute combined total fresh
+        let combinedTotal = 0;
+        const memberNames = [];
+        for (const m of members) {
+          const mJobs = jobsByCustomer[m._id.toString()] || [];
+          const comp  = await computeCustomerInvoice(m, mJobs, pricing);
+          combinedTotal += comp.grandTotal;
+          memberNames.push(m.customerName);
+        }
+
+        result.push({
+          customerId:       primaryCid,
+          customerName:     primary.customerName,
+          vehicleNumber:    primary.vehicleNumber,
+          carModel:         primary.carModel,
+          carType:          primary.carType,
+          customerPhone:    primary.phone,
+          paymentContact:   primary.paymentContact || null,
+          hasPaymentContact: !!(primary.paymentContact?.number),
+          carGroupId:       customer.carGroupId,
+          groupMemberNames: memberNames,
+          isGroupCard:      true,
+          invoiceId:        existing?._id || null,
+          invoiceNumber:    existing?.invoiceNumber || null,
+          shared:           existing?.shared || false,
+          sharedAt:         existing?.sharedAt || null,
+          paymentCollected: existing?.paymentCollected || false,
+          collectedAt:      existing?.collectedAt || null,
+          grandTotal:       existing?.grandTotal ?? combinedTotal,
+          displayTotal:     (existing?.shared || existing?.paymentCollected)
+              ? (existing?.grandTotal ?? combinedTotal)
+              : combinedTotal,
+          discountAmount:   existing?.discountAmount || 0,
+          isCombined:       true,
+        });
+        continue;
+      }
+
+      // Individual customer (no group)
+      if (jobs.length === 0) continue;
 
       const computed = await computeCustomerInvoice(customer, jobs, pricing);
       const existing = invoiceByCustomer[cid];
       const hasPaymentContact = !!(customer.paymentContact?.number);
 
       result.push({
-        customerId:        cid,
-        customerName:      customer.customerName,
-        vehicleNumber:     customer.vehicleNumber,
-        carModel:          customer.carModel,
-        carType:           customer.carType,
-        customerPhone:     customer.phone,
-        paymentContact:    customer.paymentContact || null,
+        customerId:       cid,
+        customerName:     customer.customerName,
+        vehicleNumber:    customer.vehicleNumber,
+        carModel:         customer.carModel,
+        carType:          customer.carType,
+        customerPhone:    customer.phone,
+        paymentContact:   customer.paymentContact || null,
         hasPaymentContact,
-        linkedCustomerId:  customer.linkedCustomerId || null,
+        carGroupId:       null,
+        isGroupCard:      false,
+        isCombined:       false,
         ...computed,
-        invoiceId:         existing?._id || null,
-        invoiceNumber:     existing?.invoiceNumber || null,
-        shared:            existing?.shared || false,
-        sharedAt:          existing?.sharedAt || null,
-        paymentCollected:  existing?.paymentCollected || false,
-        collectedAt:       existing?.collectedAt || null,
-        adjustment:        existing?.adjustment ?? 0,
-        lineItems:         existing?.lineItems?.length ? existing.lineItems : computed.lineItems,
-        grandTotal:        existing?.grandTotal ?? computed.grandTotal,
-        computedTotal:     computed.grandTotal, // raw pre-adjustment total, always fresh
-        // Show computed total on card if invoice not yet shared — so stale stored values don't mislead
-        displayTotal:      (existing?.shared || existing?.paymentCollected)
-          ? (existing?.grandTotal ?? computed.grandTotal)
-          : computed.grandTotal,
+        invoiceId:        existing?._id || null,
+        invoiceNumber:    existing?.invoiceNumber || null,
+        shared:           existing?.shared || false,
+        sharedAt:         existing?.sharedAt || null,
+        paymentCollected: existing?.paymentCollected || false,
+        collectedAt:      existing?.collectedAt || null,
+        adjustment:       existing?.adjustment ?? 0,
+        lineItems:        existing?.lineItems?.length
+            ? existing.lineItems : computed.lineItems,
+        grandTotal:       existing?.grandTotal ?? computed.grandTotal,
+        computedTotal:    computed.grandTotal,
+        displayTotal:     (existing?.shared || existing?.paymentCollected)
+            ? (existing?.grandTotal ?? computed.grandTotal)
+            : computed.grandTotal,
       });
     }
 
@@ -1859,32 +1924,75 @@ router.put('/invoice/:invoiceId/mark-collected', adminAuth, async (req, res) => 
 // COMBINED INVOICE
 // ═══════════════════════════════════════════════════════════════════════════
 
-// ── PUT /admin/customers/:id/link — link two customers for combined invoice ──
-router.put('/customers/:id/link', adminAuth, async (req, res) => {
+// ── PUT /admin/customers/:id/car-group — add/remove from group ───────────────
+router.put('/customers/:id/car-group', adminAuth, async (req, res) => {
   try {
-    const { linkedCustomerId } = req.body;
+    const { action, groupId } = req.body;
+    // action: 'add' | 'remove' | 'new-group'
 
-    // Link A → B
-    await Customer.findByIdAndUpdate(req.params.id,
-      { linkedCustomerId: linkedCustomerId || null });
-
-    // Link B → A (bidirectional) or clear if unlinking
-    if (linkedCustomerId) {
-      await Customer.findByIdAndUpdate(linkedCustomerId,
-        { linkedCustomerId: req.params.id });
-    } else {
-      // Unlinking — find the old linked customer and clear their link too
-      const cust = await Customer.findById(req.params.id);
-      if (cust?.linkedCustomerId) {
-        await Customer.findByIdAndUpdate(cust.linkedCustomerId,
-          { linkedCustomerId: null });
-      }
+    if (action === 'remove') {
+      // Remove this customer from their group
+      await Customer.findByIdAndUpdate(req.params.id,
+        { carGroupId: null });
+    } else if (action === 'new-group') {
+      // Start a new group with this customer + another
+      const { memberIds } = req.body; // array of customer IDs
+      const newGroupId = new mongoose.Types.ObjectId().toString();
+      await Customer.updateMany(
+        { _id: { $in: [req.params.id, ...memberIds] } },
+        { carGroupId: newGroupId });
+    } else if (action === 'add') {
+      // Add this customer to an existing group
+      await Customer.findByIdAndUpdate(req.params.id,
+        { carGroupId: groupId });
     }
 
     const updated = await Customer.findById(req.params.id);
     res.json(updated);
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
+
+// ── GET /admin/car-groups — list all groups with members ──────────────────────
+router.get('/car-groups', adminAuth, async (req, res) => {
+  try {
+    const customers = await Customer.find(
+        { carGroupId: { $ne: null } });
+    const groups = {};
+    for (const c of customers) {
+      const g = c.carGroupId;
+      if (!groups[g]) groups[g] = [];
+      groups[g].push({
+        _id: c._id, customerName: c.customerName,
+        vehicleNumber: c.vehicleNumber, carModel: c.carModel,
+        carType: c.carType, interiorType: c.interiorType,
+        paymentContact: c.paymentContact,
+      });
+    }
+    res.json(Object.entries(groups).map(([id, members]) =>
+        ({ groupId: id, members })));
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── MIGRATION: auto-migrate linkedCustomerId → carGroupId on startup ──────────
+// Runs once, safe to call multiple times (idempotent)
+(async () => {
+  try {
+    const linked = await Customer.find({
+      linkedCustomerId: { $ne: null }, carGroupId: null });
+    for (const custA of linked) {
+      const custB = await Customer.findById(custA.linkedCustomerId);
+      if (!custB) continue;
+      // Only create group if neither has one yet
+      if (!custA.carGroupId && !custB.carGroupId) {
+        const groupId = new mongoose.Types.ObjectId().toString();
+        await Customer.updateMany(
+          { _id: { $in: [custA._id, custB._id] } },
+          { carGroupId: groupId });
+        console.log(`[migration] Created car group ${groupId} for ${custA.customerName} + ${custB.customerName}`);
+      }
+    }
+  } catch (err) { console.error('[migration] car group migration failed:', err); }
+})();
 
 // ── GET /admin/invoice/compute-combined/:customerId ───────────────────────────
 router.get('/invoice/compute-combined/:customerId', adminAuth, async (req, res) => {
@@ -1894,32 +2002,34 @@ router.get('/invoice/compute-combined/:customerId', adminAuth, async (req, res) 
     const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
     const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
 
-    const custA = await Customer.findById(req.params.customerId);
-    if (!custA) return res.status(404).send('Customer not found');
-    if (!custA.linkedCustomerId) return res.status(400).send('No linked customer');
+    const cust = await Customer.findById(req.params.customerId);
+    if (!cust) return res.status(404).send('Customer not found');
+    if (!cust.carGroupId) return res.status(400).send('Customer has no car group');
 
-    const custB = await Customer.findById(custA.linkedCustomerId);
-    if (!custB) return res.status(404).send('Linked customer not found');
+    const groupMembers = await Customer.find({ carGroupId: cust.carGroupId });
+    const configDoc    = await Config.findOne({ key: 'invoicePricing' });
+    const pricing      = configDoc?.value || {};
+    const curMonth     = `${year}-${String(month).padStart(2,'0')}`;
 
-    const configDoc = await Config.findOne({ key: 'invoicePricing' });
-    const pricing   = configDoc?.value || {};
-    const curMonth  = `${year}-${String(month).padStart(2,'0')}`;
-
-    const getJobs = async (cust) => {
-      const all = await Job.find({ customerId: cust._id });
+    const getJobs = async (c) => {
+      const all = await Job.find({ customerId: c._id });
       return all.filter(j => j.assignedDate && j.assignedDate.startsWith(curMonth));
     };
 
-    const jobsA = await getJobs(custA);
-    const jobsB = await getJobs(custB);
-    const compA = await computeCustomerInvoice(custA, jobsA, pricing);
-    const compB = await computeCustomerInvoice(custB, jobsB, pricing);
+    let subtotal = 0;
+    const carData = [];
+    for (const member of groupMembers) {
+      const jobs     = await getJobs(member);
+      const computed = await computeCustomerInvoice(member, jobs, pricing);
+      subtotal += computed.grandTotal;
+      carData.push({ customer: member, computed });
+    }
 
-    res.json({
-      customerA: { id: custA._id, name: custA.customerName, computed: compA },
-      customerB: { id: custB._id, name: custB.customerName, computed: compB },
-      subtotal:  compA.grandTotal + compB.grandTotal,
-    });
+    res.json({ groupId: cust.carGroupId, carData: carData.map(d => ({
+      id:   d.customer._id,
+      name: d.customer.customerName,
+      computed: d.computed,
+    })), subtotal });
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
 
@@ -1931,50 +2041,47 @@ router.post('/invoice/generate-combined/:customerId', adminAuth, async (req, res
     const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
     const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
 
-    const { discountFlat = 0, discountPct = 0, discountReason = '', adjustment = 0 } = req.body;
+    const { discountFlat = 0, discountPct = 0,
+            discountReason = '', adjustment = 0 } = req.body;
 
-    const custA = await Customer.findById(req.params.customerId);
-    if (!custA) return res.status(404).send('Customer not found');
-    if (!custA.linkedCustomerId) return res.status(400).send('No linked customer');
-    if (!custA.paymentContact?.number)
+    const cust = await Customer.findById(req.params.customerId);
+    if (!cust) return res.status(404).send('Customer not found');
+    if (!cust.carGroupId) return res.status(400).send('No car group');
+    if (!cust.paymentContact?.number)
       return res.status(400).send('Customer has no payment contact');
 
-    const custB = await Customer.findById(custA.linkedCustomerId);
-    if (!custB) return res.status(404).send('Linked customer not found');
+    const groupMembers = await Customer.find({ carGroupId: cust.carGroupId });
+    const configDoc    = await Config.findOne({ key: 'invoicePricing' });
+    const pricing      = configDoc?.value || {};
+    const curMonth     = `${year}-${String(month).padStart(2,'0')}`;
 
-    const configDoc = await Config.findOne({ key: 'invoicePricing' });
-    const pricing   = configDoc?.value || {};
-    const curMonth  = `${year}-${String(month).padStart(2,'0')}`;
-
-    const getJobs = async (cust) => {
-      const all = await Job.find({ customerId: cust._id });
+    const getJobs = async (c) => {
+      const all = await Job.find({ customerId: c._id });
       return all.filter(j => j.assignedDate && j.assignedDate.startsWith(curMonth));
     };
 
-    const jobsA = await getJobs(custA);
-    const jobsB = await getJobs(custB);
-    const compA = await computeCustomerInvoice(custA, jobsA, pricing);
-    const compB = await computeCustomerInvoice(custB, jobsB, pricing);
+    // Compute per-car
+    const carResults = [];
+    for (const member of groupMembers) {
+      const jobs = await getJobs(member);
+      const comp = await computeCustomerInvoice(member, jobs, pricing);
+      carResults.push({ member, comp });
+    }
 
-    // Build combined line items — prefix each with customer name
-    const nameA = custA.customerName.split('-')[0].trim();
-    const nameB = custB.customerName.split('-')[0].trim();
-    const carA  = custA.customerName.includes('-')
-      ? custA.customerName.split('-').slice(1).join('-').trim() : custA.carModel;
-    const carB  = custB.customerName.includes('-')
-      ? custB.customerName.split('-').slice(1).join('-').trim() : custB.carModel;
+    // Build line items grouped by car
+    const allLineItems = [];
+    for (const { member, comp } of carResults) {
+      const name = member.customerName.split('-')[0].trim();
+      const car  = member.customerName.includes('-')
+        ? member.customerName.split('-').slice(1).join('-').trim()
+        : member.carModel;
+      const carLabel = car ? `${name} — ${car}` : name;
+      for (const item of comp.lineItems) {
+        allLineItems.push({ ...item, car: carLabel });
+      }
+    }
 
-    const lineItemsA = compA.lineItems.map(i => ({
-      label: i.label, amount: i.amount,
-      car: `${nameA} — ${carA}`,
-    }));
-    const lineItemsB = compB.lineItems.map(i => ({
-      label: i.label, amount: i.amount,
-      car: `${nameB} — ${carB}`,
-    }));
-    const allLineItems = [...lineItemsA, ...lineItemsB];
-
-    // Apply adjustment to first exterior line item (same as individual)
+    // Apply adjustment to first exterior line item
     const adjAmt = Math.round(adjustment || 0);
     if (adjAmt !== 0) {
       const extIdx = allLineItems.findIndex(i =>
@@ -1982,53 +2089,50 @@ router.post('/invoice/generate-combined/:customerId', adminAuth, async (req, res
       if (extIdx !== -1) allLineItems[extIdx].amount += adjAmt;
     }
 
-    const subtotal = compA.grandTotal + compB.grandTotal + adjAmt;
-    const pctAmt   = Math.round(subtotal * (discountPct / 100));
-    const flatAmt  = Math.round(discountFlat);
+    const rawSubtotal    = carResults.reduce((s, r) => s + r.comp.grandTotal, 0) + adjAmt;
+    const pctAmt         = Math.round(rawSubtotal * (discountPct / 100));
+    const flatAmt        = Math.round(discountFlat);
     const discountAmount = pctAmt + flatAmt;
-    const grandTotal = subtotal - discountAmount;
+    const grandTotal     = rawSubtotal - discountAmount;
 
-    // Check for existing combined invoice
+    // Build carStats — one entry per car
+    const carStats = carResults.map(({ member, comp }) => ({
+      customerId:   member._id,
+      customerName: member.customerName,
+      vehicleNumber:member.vehicleNumber,
+      carModel:     member.carModel,
+      carType:      member.carType,
+      interiorType: member.interiorType || 'None',
+      extAttempted: comp.extAttempted,
+      extCleaned:   comp.extCleaned,
+      extCancelled: comp.extCancelled,
+      intAttempted: comp.intAttempted,
+      intCleaned:   comp.intCleaned,
+      intCancelled: comp.intCancelled,
+    }));
+
     let invoice = await Invoice.findOne({
-      customerId: custA._id, month, year, isCombined: true });
+      customerId: cust._id, month, year, isCombined: true });
 
     const invoiceData = {
-      isCombined:         true,
-      linkedCustomerId:   custB._id,
-      linkedCustomerName: custB.customerName,
-      linkedVehicleNumber: custB.vehicleNumber,
-      linkedCarModel:     custB.carModel,
-      linkedCarType:      custB.carType,
-      lineItems:          allLineItems,
+      isCombined:    true,
+      carGroupId:    cust.carGroupId,
+      lineItems:     allLineItems,
       grandTotal,
-      // Legacy totals
-      attempted:          compA.attempted + compB.attempted,
-      cleaned:            compA.cleaned   + compB.cleaned,
-      cancelled:          compA.cancelled + compB.cancelled,
-      // Per-car stats — Car A
-      aExtAttempted:      compA.extAttempted,
-      aExtCleaned:        compA.extCleaned,
-      aExtCancelled:      compA.extCancelled,
-      aIntAttempted:      compA.intAttempted,
-      aIntCleaned:        compA.intCleaned,
-      aIntCancelled:      compA.intCancelled,
-      // Per-car stats — Car B
-      bExtAttempted:      compB.extAttempted,
-      bExtCleaned:        compB.extCleaned,
-      bExtCancelled:      compB.extCancelled,
-      bIntAttempted:      compB.intAttempted,
-      bIntCleaned:        compB.intCleaned,
-      bIntCancelled:      compB.intCancelled,
-      discountFlat:       flatAmt,
+      attempted:     carStats.reduce((s, c) => s + c.extAttempted + c.intAttempted, 0),
+      cleaned:       carStats.reduce((s, c) => s + c.extCleaned   + c.intCleaned,   0),
+      cancelled:     carStats.reduce((s, c) => s + c.extCancelled + c.intCancelled, 0),
+      carStats,
+      discountFlat:  flatAmt,
       discountPct,
       discountReason,
       discountAmount,
-      paymentContact:     custA.paymentContact,
-      customerName:       custA.customerName,
-      vehicleNumber:      custA.vehicleNumber,
-      carModel:           custA.carModel,
-      carType:            custA.carType,
-      customerPhone:      custA.phone || '',
+      paymentContact: cust.paymentContact,
+      customerName:  cust.customerName,
+      vehicleNumber: cust.vehicleNumber,
+      carModel:      cust.carModel,
+      carType:       cust.carType,
+      customerPhone: cust.phone || '',
     };
 
     if (invoice) {
@@ -2038,8 +2142,7 @@ router.post('/invoice/generate-combined/:customerId', adminAuth, async (req, res
       const invoiceNumber = await getNextInvoiceNumber(month, year);
       invoice = await Invoice.create({
         invoiceNumber, month, year,
-        customerId: custA._id,
-        ...invoiceData,
+        customerId: cust._id, ...invoiceData,
       });
     }
 
