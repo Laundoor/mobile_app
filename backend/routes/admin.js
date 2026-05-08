@@ -2061,7 +2061,10 @@ router.get('/salary-slip/:employeeId', adminAuth, async (req, res) => {
     const slip = await SalarySlip.findOne({
       employeeId: req.params.employeeId, month, year });
     res.json(slip || null);
-  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+  } catch (err) {
+    console.error('[salary-slip GET]', err);
+    res.status(500).send('Server error');
+  }
 });
 
 // ── POST /admin/salary-slip/:employeeId — create/update salary slip ───────────
