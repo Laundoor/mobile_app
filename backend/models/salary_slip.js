@@ -19,7 +19,9 @@ const salarySlipSchema = new mongoose.Schema({
   baseSalary:        { type: Number, default: 0 },
   distanceAllowance: { type: Number, default: 0 },
   dailyIncentive:    { type: Number, default: 0 },
-  computedTotal:     { type: Number, default: 0 }, // base + distance + incentive
+  computedTotal:     { type: Number, default: 0 },
+  daysWorked:        { type: Number, default: 0 },
+  totalWorkingDays:  { type: Number, default: 0 }, // base + distance + incentive
 
   // Manual bonus fields — only saved if admin enters them
   salesIncentive:      [bonusItemSchema],
@@ -32,9 +34,9 @@ const salarySlipSchema = new mongoose.Schema({
   // Net total = computedTotal + all bonuses - all deductions
   netTotal: { type: Number, default: 0 },
 
-  // Share status
-  shared:   { type: Boolean, default: false },
-  sharedAt: { type: Date, default: null },
+  // Payment status
+  paymentStatus: { type: String, enum: ['Pending', 'Paid'], default: 'Pending' },
+  paidAt:        { type: Date, default: null },
 
 }, { timestamps: true });
 

@@ -483,8 +483,30 @@ router.get('/customers/:id/monthly-counts', adminAuth, async (req, res) => {
   }
 });
 
-// ═══════════════════════════════════════════════════════════════════════════
-// JOB ASSIGNMENT
+// ── Holidays config ───────────────────────────────────────────────────────────
+// Stored as { "YYYY-MM": ["YYYY-MM-DD", ...] } — keyed by month
+router.get('/config/holidays', adminAuth, async (req, res) => {
+  try {
+    const doc = await Config.findOne({ key: 'holidays' });
+    res.json(doc?.value || {});
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+router.put('/config/holidays', adminAuth, async (req, res) => {
+  try {
+    // req.body: { month: "YYYY-MM", dates: ["YYYY-MM-DD", ...] }
+    const { month, dates } = req.body;
+    const doc = await Config.findOne({ key: 'holidays' });
+    const current = doc?.value || {};
+    current[month] = dates || [];
+    await Config.findOneAndUpdate(
+      { key: 'holidays' },
+      { key: 'holidays', value: current },
+      { upsert: true }
+    );
+    res.json(current);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
 // ═══════════════════════════════════════════════════════════════════════════
 router.post('/assign', adminAuth, async (req, res) => {
   try {
@@ -906,6 +928,37 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         d.jobEarnings + d.distanceEarnings + d.incentive);
     }
 
+    // ── Attendance — days worked + total working days ────────────────────────
+    const curMonth    = `${year}-${String(month).padStart(2,'0')}`;
+    const attendances = await Attendance.find({
+      employeeId,
+      date: {
+        $gte: `${curMonth}-01`,
+        $lt:  month === 12
+          ? `${year+1}-01-01`
+          : `${year}-${String(month+1).padStart(2,'0')}-01`,
+      },
+    });
+
+    // Fetch declared holidays for this month
+    const holidayDoc  = await Config.findOne({ key: 'holidays' });
+    const holidays    = new Set((holidayDoc?.value?.[curMonth] || []));
+
+    const workedDates    = new Set(attendances.map(a => a.date));
+    const daysWorked     = workedDates.size;
+    const daysInMonth    = new Date(year, month, 0).getDate();
+    let totalWorkingDays = 0;
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dow = new Date(year, month - 1, d).getDay(); // 0 = Sunday
+      const dk  = `${curMonth}-${String(d).padStart(2, '0')}`;
+      if (holidays.has(dk)) continue;     // declared holiday — skip
+      if (dow !== 0) {
+        totalWorkingDays++;               // non-Sunday always counts
+      } else if (workedDates.has(dk)) {
+        totalWorkingDays++;               // Sunday only if worked
+      }
+    }
+
     res.json({
       employee: { id: employee._id, name: employee.name, email: employee.email,
                   hasHomeLocation: !!home },
@@ -921,6 +974,8 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
         totalIncentive:       halfDownRound(totalIncentive),
         grandTotal:           halfDownRound(totalJobEarnings + totalDistanceEarnings + totalIncentive),
         skippedCustomers:     totalSkippedCustomers,
+        daysWorked,
+        totalWorkingDays,
       },
       jobDetails,
       dayDetails: Object.values(dayDetails).sort((a, b) => a.date.localeCompare(b.date)),
@@ -2189,6 +2244,7 @@ router.post('/salary-slip/:employeeId', adminAuth, async (req, res) => {
 
     const {
       baseSalary, distanceAllowance, dailyIncentive,
+      daysWorked, totalWorkingDays,
       salesIncentive, employeeReferral, bonus, deductions,
       employeeName, employeePhone, joiningDate,
     } = req.body;
@@ -2209,6 +2265,8 @@ router.post('/salary-slip/:employeeId', adminAuth, async (req, res) => {
     const slipData = {
       employeeName, employeePhone, joiningDate,
       baseSalary, distanceAllowance, dailyIncentive,
+      daysWorked: daysWorked || 0,
+      totalWorkingDays: totalWorkingDays || 0,
       computedTotal, salesIncentive, employeeReferral,
       bonus, deductions, netTotal,
     };
@@ -2223,6 +2281,19 @@ router.post('/salary-slip/:employeeId', adminAuth, async (req, res) => {
       });
     }
 
+    res.json(slip);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── PUT /admin/salary-slip/:slipId/mark-paid ──────────────────────────────────
+router.put('/salary-slip/:slipId/mark-paid', adminAuth, async (req, res) => {
+  try {
+    const slip = await SalarySlip.findByIdAndUpdate(
+      req.params.slipId,
+      { $set: { paymentStatus: 'Paid', paidAt: new Date() } },
+      { new: true }
+    );
+    if (!slip) return res.status(404).send('Slip not found');
     res.json(slip);
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
