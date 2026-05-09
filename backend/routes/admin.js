@@ -1632,13 +1632,14 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
       const jobs = jobsByCustomer[cid] || [];
 
       // If customer is in a group, handle as combined card
-      if (customer.carGroupId) {
-        if (processedGroups.has(customer.carGroupId)) continue;
-        processedGroups.add(customer.carGroupId);
+      if (customer.carGroupId && customer.carGroupId.toString().trim() !== '') {
+        const gid = customer.carGroupId.toString();
+        if (processedGroups.has(gid)) continue;
+        processedGroups.add(gid);
 
         // Find all group members
         const members = customers.filter(c =>
-            c.carGroupId === customer.carGroupId);
+            c.carGroupId && c.carGroupId.toString() === gid);
 
         // Check if any member has activity this month
         const hasActivity = members.some(m =>
@@ -1652,7 +1653,8 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
 
         // Find existing combined invoice
         const existing = existingInvoices.find(inv =>
-            inv.isCombined && inv.carGroupId === customer.carGroupId);
+            inv.isCombined && inv.carGroupId &&
+            inv.carGroupId.toString() === gid);
 
         // Compute combined total fresh
         let combinedTotal = 0;
@@ -1927,29 +1929,36 @@ router.put('/invoice/:invoiceId/mark-collected', adminAuth, async (req, res) => 
 // ── PUT /admin/customers/:id/car-group — add/remove from group ───────────────
 router.put('/customers/:id/car-group', adminAuth, async (req, res) => {
   try {
-    const { action, groupId } = req.body;
-    // action: 'add' | 'remove' | 'new-group'
+    const { action, groupId, memberIds } = req.body;
+    console.log(`[car-group] action=${action} customerId=${req.params.id} groupId=${groupId} memberIds=${JSON.stringify(memberIds)}`);
 
     if (action === 'remove') {
-      // Remove this customer from their group
       await Customer.findByIdAndUpdate(req.params.id,
-        { carGroupId: null });
+        { $set: { carGroupId: null } });
+      console.log(`[car-group] removed ${req.params.id} from group`);
+
     } else if (action === 'new-group') {
-      // Start a new group with this customer + another
-      const { memberIds } = req.body; // array of customer IDs
       const newGroupId = new mongoose.Types.ObjectId().toString();
-      await Customer.updateMany(
-        { _id: { $in: [req.params.id, ...memberIds] } },
-        { carGroupId: newGroupId });
+      const allIds = [req.params.id, ...(memberIds || [])];
+      const result = await Customer.updateMany(
+        { _id: { $in: allIds } },
+        { $set: { carGroupId: newGroupId } });
+      console.log(`[car-group] created group ${newGroupId} for ${allIds} — modified ${result.modifiedCount}`);
+
     } else if (action === 'add') {
-      // Add this customer to an existing group
-      await Customer.findByIdAndUpdate(req.params.id,
-        { carGroupId: groupId });
+      if (!groupId) return res.status(400).send('groupId required for add action');
+      const result = await Customer.findByIdAndUpdate(req.params.id,
+        { $set: { carGroupId: groupId } }, { new: true });
+      console.log(`[car-group] added ${req.params.id} to group ${groupId} — result=${result?.carGroupId}`);
     }
 
     const updated = await Customer.findById(req.params.id);
+    console.log(`[car-group] final carGroupId=${updated?.carGroupId}`);
     res.json(updated);
-  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+  } catch (err) {
+    console.error('[car-group] error:', err);
+    res.status(500).send('Server error');
+  }
 });
 
 // ── GET /admin/car-groups — list all groups with members ──────────────────────
