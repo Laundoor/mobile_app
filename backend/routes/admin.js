@@ -1811,15 +1811,16 @@ router.get('/invoice/metrics', adminAuth, async (req, res) => {
       .reduce((s, i) => s + (i.grandTotal || 0), 0);
     const totalPending   = Math.round((totalRevenue - totalCollected) * 100) / 100;
 
-    // Per contact breakdown — keyed by contact name
+    // Per contact breakdown — keyed by lowercase name to avoid duplicates
     const byContact = {};
     for (const inv of invoices) {
       const name = (inv.paymentContact?.name || '').trim();
       if (!name) continue;
-      if (!byContact[name]) byContact[name] = { name, invoiced: 0, collected: 0 };
-      byContact[name].invoiced  += inv.grandTotal || 0;
+      const key = name.toLowerCase();
+      if (!byContact[key]) byContact[key] = { name, invoiced: 0, collected: 0 };
+      byContact[key].invoiced  += inv.grandTotal || 0;
       if (inv.paymentCollected)
-        byContact[name].collected += inv.grandTotal || 0;
+        byContact[key].collected += inv.grandTotal || 0;
     }
     for (const k of Object.keys(byContact)) {
       byContact[k].invoiced  = Math.round(byContact[k].invoiced);
@@ -1827,13 +1828,14 @@ router.get('/invoice/metrics', adminAuth, async (req, res) => {
     }
 
     // Always include configured payment contacts from invoicePricing
-    // so filter chips show even if no invoices generated yet
-    const pricingDoc = await Config.findOne({ key: 'invoicePricing' });
+    const pricingDoc    = await Config.findOne({ key: 'invoicePricing' });
     const configContacts = (pricingDoc?.value?.contacts || []);
     for (const cc of configContacts) {
       const name = (cc.name || '').trim();
-      if (name && !byContact[name]) {
-        byContact[name] = { name, invoiced: 0, collected: 0 };
+      if (!name) continue;
+      const key = name.toLowerCase();
+      if (!byContact[key]) {
+        byContact[key] = { name, invoiced: 0, collected: 0 };
       }
     }
 
