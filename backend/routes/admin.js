@@ -1811,32 +1811,39 @@ router.get('/invoice/metrics', adminAuth, async (req, res) => {
       .reduce((s, i) => s + (i.grandTotal || 0), 0);
     const totalPending   = Math.round((totalRevenue - totalCollected) * 100) / 100;
 
-    // Per contact breakdown — keyed by lowercase name to avoid duplicates
+    // Always use config contacts as source of truth — match by phone number
+    const pricingDoc     = await Config.findOne({ key: 'invoicePricing' });
+    const configContacts = (pricingDoc?.value?.contacts || []);
+
+    // Build lookup: phone number → canonical config name
+    const phoneToName = {};
+    for (const cc of configContacts) {
+      const num  = (cc.number || '').trim();
+      const name = (cc.name   || '').trim();
+      if (num) phoneToName[num] = name;
+    }
+
+    // Per contact breakdown — keyed by canonical config name
     const byContact = {};
+    // Pre-populate with config contacts at 0
+    for (const cc of configContacts) {
+      const name = (cc.name || '').trim();
+      if (name) byContact[name] = { name, invoiced: 0, collected: 0 };
+    }
+
     for (const inv of invoices) {
-      const name = (inv.paymentContact?.name || '').trim();
+      const num  = (inv.paymentContact?.number || '').trim();
+      // Resolve to canonical name via phone number
+      const name = phoneToName[num] || (inv.paymentContact?.name || '').trim();
       if (!name) continue;
-      const key = name.toLowerCase();
-      if (!byContact[key]) byContact[key] = { name, invoiced: 0, collected: 0 };
-      byContact[key].invoiced  += inv.grandTotal || 0;
+      if (!byContact[name]) byContact[name] = { name, invoiced: 0, collected: 0 };
+      byContact[name].invoiced  += inv.grandTotal || 0;
       if (inv.paymentCollected)
-        byContact[key].collected += inv.grandTotal || 0;
+        byContact[name].collected += inv.grandTotal || 0;
     }
     for (const k of Object.keys(byContact)) {
       byContact[k].invoiced  = Math.round(byContact[k].invoiced);
       byContact[k].collected = Math.round(byContact[k].collected);
-    }
-
-    // Always include configured payment contacts from invoicePricing
-    const pricingDoc    = await Config.findOne({ key: 'invoicePricing' });
-    const configContacts = (pricingDoc?.value?.contacts || []);
-    for (const cc of configContacts) {
-      const name = (cc.name || '').trim();
-      if (!name) continue;
-      const key = name.toLowerCase();
-      if (!byContact[key]) {
-        byContact[key] = { name, invoiced: 0, collected: 0 };
-      }
     }
 
     res.json({
