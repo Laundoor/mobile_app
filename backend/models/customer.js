@@ -25,6 +25,9 @@ const customerSchema = new mongoose.Schema({
     qrImageUrl: { type: String, default: null },
   },
 
+  // Active status — inactive customers excluded from planner, calculations
+  isActive: { type: Boolean, default: true },
+
   // Car group — customers with same carGroupId are billed together
   // Replaces old linkedCustomerId (two-car only) with N-car group support
   carGroupId: { type: String, default: null },

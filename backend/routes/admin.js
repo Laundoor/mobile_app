@@ -1,6 +1,8 @@
 const express    = require('express');
 const mongoose   = require('mongoose');
 const Attendance = require('../models/attendance');
+const Expense    = require('../models/expense');
+const Fund       = require('../models/fund');
 
 const router   = express.Router();
 const User     = require('../models/user');
@@ -220,15 +222,18 @@ router.post('/employees', adminAuth, async (req, res) => {
 
 router.get('/employees', adminAuth, async (req, res) => {
   try {
+    const { includeInactive } = req.query;
     const today     = todayIST();
-    const employees = await User.find({ role: 'employee' }).select('-password');
+    const filter    = { role: 'employee' };
+    if (includeInactive !== 'true') filter.isActive = true;
+    const employees = await User.find(filter).select('-password');
     const allJobs   = await Job.find({ assignedDate: today });
     const result = employees.map(emp => {
       const empJobs       = allJobs.filter(j => j.employeeId.toString() === emp._id.toString());
       const isActiveToday = emp.lastActiveDate === today && emp.isActive;
       return {
         ...emp.toObject(),
-        isActive:      isActiveToday,
+        isActiveToday,
         todayJobs:     empJobs.length,
         pendingJobs:   empJobs.filter(j => j.status === 'Pending').length,
         inProgressJobs:empJobs.filter(j => j.status === 'In Progress').length,
@@ -297,10 +302,9 @@ router.post('/customers', adminAuth, async (req, res) => {
 
 router.get('/customers', adminAuth, async (req, res) => {
   try {
-    const { search } = req.query;
-    const filter = search
-      ? { customerName: { $regex: search, $options: 'i' } }
-      : {};
+    const { search, includeInactive } = req.query;
+    const filter = { isActive: includeInactive === 'true' ? false : { $ne: false } };
+    if (search) filter.customerName = { $regex: search, $options: 'i' };
     const customers = await Customer.find(filter).sort({ createdAt: -1 });
     res.json(customers);
   } catch (err) { res.status(500).send("Server error"); }
@@ -1655,7 +1659,7 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
 
     const configDoc = await Config.findOne({ key: 'invoicePricing' });
     const pricing   = configDoc?.value || {};
-    const customers = await Customer.find({});
+    const customers = await Customer.find({ isActive: { $ne: false } });
 
     const allJobsRaw = await Job.find({
       assignedDate: {
@@ -2281,6 +2285,17 @@ router.post('/salary-slip/:employeeId', adminAuth, async (req, res) => {
       });
     }
 
+    // Credit material fund for ₹100 deductions present in slip
+    const materialDeduction = (deductions || []).find(d =>
+        d.reason && d.reason.toLowerCase().includes('material'));
+    if (materialDeduction?.amount) {
+      await Fund.findOneAndUpdate(
+        { fundType: 'material' },
+        { $inc: { balance: materialDeduction.amount } },
+        { upsert: true }
+      );
+    }
+
     res.json(slip);
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
@@ -2308,6 +2323,184 @@ router.put('/salary-slip/:slipId/mark-shared', adminAuth, async (req, res) => {
     );
     if (!slip) return res.status(404).send('Slip not found');
     res.json(slip);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXPENSES & FUNDS
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── GET /admin/expenses?month=&year= ─────────────────────────────────────────
+router.get('/expenses', adminAuth, async (req, res) => {
+  try {
+    const ist   = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
+    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
+    const expenses = await Expense.find({ month, year }).sort({ date: -1 });
+    res.json(expenses);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── POST /admin/expenses ──────────────────────────────────────────────────────
+router.post('/expenses', adminAuth, async (req, res) => {
+  try {
+    const { month, year, date, fundType, category, amount, note } = req.body;
+    const expense = await Expense.create({
+      month, year, date, fundType, category,
+      amount: Math.round(amount),
+      note: note || '',
+    });
+
+    // If top-up — credit the relevant fund
+    if (fundType === 'material-topup' || fundType === 'bd-topup') {
+      const ft = fundType === 'material-topup' ? 'material' : 'bd';
+      await Fund.findOneAndUpdate(
+        { fundType: ft },
+        { $inc: { balance: Math.round(amount) } },
+        { upsert: true }
+      );
+    }
+
+    // If material/bd spending — debit the fund
+    if (fundType === 'material' || fundType === 'bd') {
+      await Fund.findOneAndUpdate(
+        { fundType },
+        { $inc: { balance: -Math.round(amount) } },
+        { upsert: true }
+      );
+    }
+
+    res.json(expense);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── DELETE /admin/expenses/:id ────────────────────────────────────────────────
+router.delete('/expenses/:id', adminAuth, async (req, res) => {
+  try {
+    const expense = await Expense.findById(req.params.id);
+    if (!expense) return res.status(404).send('Not found');
+
+    // Reverse the fund effect
+    if (expense.fundType === 'material-topup' || expense.fundType === 'bd-topup') {
+      const ft = expense.fundType === 'material-topup' ? 'material' : 'bd';
+      await Fund.findOneAndUpdate({ fundType: ft },
+        { $inc: { balance: -expense.amount } });
+    }
+    if (expense.fundType === 'material' || expense.fundType === 'bd') {
+      await Fund.findOneAndUpdate({ fundType: expense.fundType },
+        { $inc: { balance: expense.amount } });
+    }
+
+    await Expense.findByIdAndDelete(req.params.id);
+    res.json({ deleted: true });
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── GET /admin/funds ──────────────────────────────────────────────────────────
+router.get('/funds', adminAuth, async (req, res) => {
+  try {
+    const [material, bd] = await Promise.all([
+      Fund.findOne({ fundType: 'material' }),
+      Fund.findOne({ fundType: 'bd' }),
+    ]);
+    res.json({
+      material: { balance: material?.balance ?? 0, openingBalance: material?.openingBalance ?? 0 },
+      bd:       { balance: bd?.balance ?? 0,       openingBalance: bd?.openingBalance ?? 0 },
+    });
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── PUT /admin/funds/:fundType/opening ───────────────────────────────────────
+// Set opening balance once
+router.put('/funds/:fundType/opening', adminAuth, async (req, res) => {
+  try {
+    const { amount } = req.body;
+    const fund = await Fund.findOneAndUpdate(
+      { fundType: req.params.fundType },
+      { $set: { openingBalance: Math.round(amount), balance: Math.round(amount) } },
+      { upsert: true, new: true }
+    );
+    res.json(fund);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── GET /admin/pl?month=&year= — P&L summary ─────────────────────────────────
+router.get('/pl', adminAuth, async (req, res) => {
+  try {
+    const ist   = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
+    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
+
+    // Revenue from invoices
+    const invoices = await Invoice.find({ month, year, isCombined: { $ne: true } });
+    const combinedInvoices = await Invoice.find({ month, year, isCombined: true });
+    const allInvoices = [...invoices, ...combinedInvoices];
+
+    const totalInvoiced   = allInvoices.reduce((s, i) => s + (i.grandTotal || 0), 0);
+    const totalCollected  = allInvoices
+        .filter(i => i.paymentCollected)
+        .reduce((s, i) => s + (i.grandTotal || 0), 0);
+    const totalOutstanding = totalInvoiced - totalCollected;
+
+    // Salary from slips
+    const slips = await SalarySlip.find({ month, year });
+    const totalSalaryPayable = slips.reduce((s, sl) => s + (sl.netTotal || 0), 0);
+    const totalSalaryPaid    = slips
+        .filter(sl => sl.paymentStatus === 'Paid')
+        .reduce((s, sl) => s + (sl.netTotal || 0), 0);
+    const totalSalaryPending = totalSalaryPayable - totalSalaryPaid;
+
+    // Expenses
+    const expenses = await Expense.find({ month, year });
+    const plExpenses    = expenses.filter(e => e.fundType === 'pl');
+    const materialTopups = expenses
+        .filter(e => e.fundType === 'material-topup')
+        .reduce((s, e) => s + e.amount, 0);
+    const bdTopups = expenses
+        .filter(e => e.fundType === 'bd-topup')
+        .reduce((s, e) => s + e.amount, 0);
+
+    // Group P&L expenses by category
+    const byCategory = {};
+    for (const e of plExpenses) {
+      byCategory[e.category] = (byCategory[e.category] || 0) + e.amount;
+    }
+    const totalPlExpenses = plExpenses.reduce((s, e) => s + e.amount, 0);
+
+    // Material fund — ₹100 per active employee (from slips with that deduction)
+    const materialFromSlips = slips.reduce((s, sl) => {
+      const deduction = (sl.deductions || [])
+          .find(d => d.reason && d.reason.toLowerCase().includes('material'));
+      return s + (deduction?.amount || 0);
+    }, 0);
+
+    // Net profit = collected - salary paid - pl expenses - fund topups
+    const netProfit = totalCollected - totalSalaryPaid - totalPlExpenses
+        - materialTopups - bdTopups;
+
+    res.json({
+      month, year,
+      revenue: { invoiced: totalInvoiced, collected: totalCollected, outstanding: totalOutstanding },
+      salary:  { payable: totalSalaryPayable, paid: totalSalaryPaid, pending: totalSalaryPending },
+      fundAllocations: { material: materialTopups, bd: bdTopups, materialFromSlips },
+      expensesByCategory: byCategory,
+      totalPlExpenses,
+      netProfit,
+    });
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── PUT /admin/customers/:id/active — toggle customer active status ────────────
+router.put('/customers/:id/active', adminAuth, async (req, res) => {
+  try {
+    const { isActive } = req.body;
+    const customer = await Customer.findByIdAndUpdate(
+      req.params.id,
+      { $set: { isActive: !!isActive } },
+      { new: true }
+    );
+    if (!customer) return res.status(404).send('Not found');
+    res.json(customer);
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
 

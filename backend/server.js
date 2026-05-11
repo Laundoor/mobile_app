@@ -12,6 +12,8 @@ app.use(express.json());
 // Register models explicitly so they're available across all routes
 require('./models/invoice');
 require('./models/salary_slip');
+require('./models/expense');
+require('./models/fund');
 
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB Connected"))
