@@ -2285,13 +2285,62 @@ router.post('/salary-slip/:employeeId', adminAuth, async (req, res) => {
       });
     }
 
-    // Credit material fund for ₹100 deductions present in slip
+    // Credit material fund — consolidated monthly transaction
     const materialDeduction = (deductions || []).find(d =>
         d.reason && d.reason.toLowerCase().includes('material'));
     if (materialDeduction?.amount) {
+      const ist      = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+      const dateStr  = `${year}-${String(month).padStart(2,'0')}-01`;
+      const monthLabel = new Date(year, month - 1, 1)
+          .toLocaleString('default', { month: 'long' });
+
+      // Count all slips this month with material deduction to build total
+      const allSlips = await SalarySlip.find({ month, year });
+      const totalFromSlips = allSlips.reduce((sum, s) => {
+        const d = (s.deductions || []).find(d =>
+            d.reason && d.reason.toLowerCase().includes('material'));
+        return sum + (d?.amount || 0);
+      }, 0);
+      const employeeCount = allSlips.filter(s =>
+          (s.deductions || []).some(d =>
+              d.reason && d.reason.toLowerCase().includes('material'))).length;
+
+      // Upsert a single consolidated expense record for this month
+      const existing = await Expense.findOne({
+        fundType: 'material-topup', month, year,
+        category: 'Material Fund Top-up',
+        note: { $regex: 'salary slip' },
+      });
+
+      const note = `Salary slip deductions — ${monthLabel} ${year} (${employeeCount} employee${employeeCount === 1 ? '' : 's'})`;
+
+      if (existing) {
+        existing.amount = totalFromSlips;
+        existing.note   = note;
+        await existing.save();
+      } else {
+        await Expense.create({
+          month, year, date: dateStr,
+          fundType: 'material-topup',
+          category: 'Material Fund Top-up',
+          amount:   totalFromSlips,
+          note,
+        });
+      }
+
+      // Update fund balance
       await Fund.findOneAndUpdate(
         { fundType: 'material' },
-        { $inc: { balance: materialDeduction.amount } },
+        { $set: { balance: 0 } }, // reset then recalculate below
+        { upsert: true }
+      );
+      // Recalculate fund balance from all expense records
+      const allMaterialExpenses = await Expense.find({ fundType: { $in: ['material', 'material-topup'] } });
+      const balance = allMaterialExpenses.reduce((sum, e) =>
+          e.fundType === 'material-topup' ? sum + e.amount : sum - e.amount, 0);
+      await Fund.findOneAndUpdate(
+        { fundType: 'material' },
+        { $set: { balance } },
         { upsert: true }
       );
     }
@@ -2467,12 +2516,11 @@ router.get('/pl', adminAuth, async (req, res) => {
     }
     const totalPlExpenses = plExpenses.reduce((s, e) => s + e.amount, 0);
 
-    // Material fund — ₹100 per active employee (from slips with that deduction)
-    const materialFromSlips = slips.reduce((s, sl) => {
-      const deduction = (sl.deductions || [])
-          .find(d => d.reason && d.reason.toLowerCase().includes('material'));
-      return s + (deduction?.amount || 0);
-    }, 0);
+    // Material fund — from consolidated monthly slip deduction expense
+    const materialFromSlipsExpense = expenses.find(e =>
+        e.fundType === 'material-topup' &&
+        e.note && e.note.includes('salary slip'));
+    const materialFromSlips = materialFromSlipsExpense?.amount || 0;
 
     // Net profit = collected - salary paid - pl expenses - fund topups
     const netProfit = totalCollected - totalSalaryPaid - totalPlExpenses
