@@ -1811,27 +1811,37 @@ router.get('/invoice/metrics', adminAuth, async (req, res) => {
       .reduce((s, i) => s + (i.grandTotal || 0), 0);
     const totalPending   = Math.round((totalRevenue - totalCollected) * 100) / 100;
 
-    // Per contact breakdown
+    // Per contact breakdown — keyed by contact name
     const byContact = {};
     for (const inv of invoices) {
-      const key  = inv.paymentContact?.number || 'Unknown';
-      const name = inv.paymentContact?.name   || 'Unknown';
-      if (!byContact[key]) byContact[key] = { name, invoiced: 0, collected: 0 };
-      byContact[key].invoiced  += inv.grandTotal || 0;
+      const name = (inv.paymentContact?.name || '').trim();
+      if (!name) continue;
+      if (!byContact[name]) byContact[name] = { name, invoiced: 0, collected: 0 };
+      byContact[name].invoiced  += inv.grandTotal || 0;
       if (inv.paymentCollected)
-        byContact[key].collected += inv.grandTotal || 0;
+        byContact[name].collected += inv.grandTotal || 0;
     }
-    // Round byContact values
     for (const k of Object.keys(byContact)) {
-      byContact[k].invoiced  = Math.round(byContact[k].invoiced  * 100) / 100;
-      byContact[k].collected = Math.round(byContact[k].collected * 100) / 100;
+      byContact[k].invoiced  = Math.round(byContact[k].invoiced);
+      byContact[k].collected = Math.round(byContact[k].collected);
+    }
+
+    // Always include configured payment contacts from invoicePricing
+    // so filter chips show even if no invoices generated yet
+    const pricingDoc = await Config.findOne({ key: 'invoicePricing' });
+    const configContacts = (pricingDoc?.value?.contacts || []);
+    for (const cc of configContacts) {
+      const name = (cc.name || '').trim();
+      if (name && !byContact[name]) {
+        byContact[name] = { name, invoiced: 0, collected: 0 };
+      }
     }
 
     res.json({
       month, year,
-      totalRevenue:   Math.round(totalRevenue   * 100) / 100,
-      totalCollected: Math.round(totalCollected * 100) / 100,
-      totalPending,
+      totalRevenue:   Math.round(totalRevenue),
+      totalCollected: Math.round(totalCollected),
+      totalPending:   Math.round(totalPending),
       byContact: Object.values(byContact),
     });
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
