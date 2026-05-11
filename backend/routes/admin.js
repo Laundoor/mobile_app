@@ -2305,19 +2305,25 @@ router.post('/salary-slip/:employeeId', adminAuth, async (req, res) => {
           (s.deductions || []).some(d =>
               d.reason && d.reason.toLowerCase().includes('material'))).length;
 
-      // Upsert a single consolidated expense record for this month
-      const existing = await Expense.findOne({
+      // Upsert a single consolidated expense record — delete any duplicates first
+      const slipExpenseFilter = {
         fundType: 'material-topup', month, year,
         category: 'Material Fund Top-up',
-        note: { $regex: 'salary slip' },
-      });
+        note: { $regex: 'salary slip', $options: 'i' },
+      };
+      const allExisting = await Expense.find(slipExpenseFilter)
+          .sort({ createdAt: -1 });
 
       const note = `Salary slip deductions — ${monthLabel} ${year} (${employeeCount} employee${employeeCount === 1 ? '' : 's'})`;
 
-      if (existing) {
-        existing.amount = totalFromSlips;
-        existing.note   = note;
-        await existing.save();
+      if (allExisting.length > 0) {
+        // Keep the first, delete any duplicates, update amount
+        for (let i = 1; i < allExisting.length; i++) {
+          await Expense.findByIdAndDelete(allExisting[i]._id);
+        }
+        allExisting[0].amount = totalFromSlips;
+        allExisting[0].note   = note;
+        await allExisting[0].save();
       } else {
         await Expense.create({
           month, year, date: dateStr,
@@ -2514,17 +2520,23 @@ router.get('/pl', adminAuth, async (req, res) => {
     }
     const totalPlExpenses = plExpenses.reduce((s, e) => s + e.amount, 0);
 
-    // Material from slips — always read directly from slip deductions (reliable regardless of expense records)
-    const materialFromSlips = slips.reduce((s, sl) => {
-      const deduction = (sl.deductions || [])
-          .find(d => d.reason && d.reason.toLowerCase().includes('material'));
-      return s + (deduction?.amount || 0);
-    }, 0);
+    // Material from slips — read from consolidated expense records first (case-insensitive)
+    // Falls back to reading directly from slip deductions if no expense record exists
+    const slipExpenses = expenses.filter(e =>
+        e.fundType === 'material-topup' &&
+        e.note && e.note.toLowerCase().includes('salary slip'));
+    const materialFromSlips = slipExpenses.length > 0
+        ? slipExpenses.reduce((s, e) => s + e.amount, 0)
+        : slips.reduce((s, sl) => {
+            const d = (sl.deductions || []).find(d =>
+                d.reason && d.reason.toLowerCase().includes('material'));
+            return s + (d?.amount || 0);
+          }, 0);
 
-    // Manual material topups only (exclude auto slip entries to avoid double counting)
+    // Manual material topups only — exclude auto slip entries (case-insensitive)
     const materialTopups = expenses
         .filter(e => e.fundType === 'material-topup' &&
-            !(e.note && e.note.includes('salary slip')))
+            !(e.note && e.note.toLowerCase().includes('salary slip')))
         .reduce((s, e) => s + e.amount, 0);
 
     // Net profit = collected - salary paid - pl expenses - fund topups - material from slips
