@@ -2501,10 +2501,8 @@ router.get('/pl', adminAuth, async (req, res) => {
 
     // Expenses
     const expenses = await Expense.find({ month, year });
-    const plExpenses    = expenses.filter(e => e.fundType === 'pl');
-    const materialTopups = expenses
-        .filter(e => e.fundType === 'material-topup')
-        .reduce((s, e) => s + e.amount, 0);
+    const plExpenses = expenses.filter(e => e.fundType === 'pl');
+
     const bdTopups = expenses
         .filter(e => e.fundType === 'bd-topup')
         .reduce((s, e) => s + e.amount, 0);
@@ -2516,15 +2514,22 @@ router.get('/pl', adminAuth, async (req, res) => {
     }
     const totalPlExpenses = plExpenses.reduce((s, e) => s + e.amount, 0);
 
-    // Material fund — from consolidated monthly slip deduction expense
-    const materialFromSlipsExpense = expenses.find(e =>
-        e.fundType === 'material-topup' &&
-        e.note && e.note.includes('salary slip'));
-    const materialFromSlips = materialFromSlipsExpense?.amount || 0;
+    // Material from slips — always read directly from slip deductions (reliable regardless of expense records)
+    const materialFromSlips = slips.reduce((s, sl) => {
+      const deduction = (sl.deductions || [])
+          .find(d => d.reason && d.reason.toLowerCase().includes('material'));
+      return s + (deduction?.amount || 0);
+    }, 0);
 
-    // Net profit = collected - salary paid - pl expenses - fund topups
+    // Manual material topups only (exclude auto slip entries to avoid double counting)
+    const materialTopups = expenses
+        .filter(e => e.fundType === 'material-topup' &&
+            !(e.note && e.note.includes('salary slip')))
+        .reduce((s, e) => s + e.amount, 0);
+
+    // Net profit = collected - salary paid - pl expenses - fund topups - material from slips
     const netProfit = totalCollected - totalSalaryPaid - totalPlExpenses
-        - materialTopups - bdTopups;
+        - materialTopups - bdTopups - materialFromSlips;
 
     res.json({
       month, year,
