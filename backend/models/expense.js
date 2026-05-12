@@ -12,7 +12,7 @@ const expenseSchema = new mongoose.Schema({
   // 'fund-top-up' = Admin adding money to material/bd fund (credits fund, debits revenue)
   fundType: {
     type: String,
-    enum: ['pl', 'material', 'bd', 'material-topup', 'bd-topup'],
+    enum: ['pl', 'material', 'bd', 'material-topup', 'bd-topup', 'manual-salary'],
     default: 'pl',
   },
 
@@ -28,6 +28,8 @@ const expenseSchema = new mongoose.Schema({
       'BD Expense',
       // Top-ups
       'Material Fund Top-up', 'BD Fund Top-up',
+      // Manual salary (support staff)
+      'Manual Salary',
     ],
     required: true,
   },

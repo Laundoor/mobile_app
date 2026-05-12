@@ -2522,7 +2522,16 @@ router.get('/pl', adminAuth, async (req, res) => {
     const totalSalaryPaid    = slips
         .filter(sl => sl.paymentStatus === 'Paid')
         .reduce((s, sl) => s + (sl.netTotal || 0), 0);
-    const totalSalaryPending = totalSalaryPayable - totalSalaryPaid;
+
+    // Manual salary entries (support staff)
+    const manualSalaryExpenses = await Expense.find({
+        month, year, fundType: 'manual-salary' });
+    const totalManualSalary = manualSalaryExpenses
+        .reduce((s, e) => s + (e.amount || 0), 0);
+
+    const totalSalaryWithManual  = totalSalaryPayable + totalManualSalary;
+    const totalSalaryPaidWithManual = totalSalaryPaid + totalManualSalary;
+    const totalSalaryPending     = totalSalaryPayable - totalSalaryPaid;
 
     // Expenses
     const expenses = await Expense.find({ month, year });
@@ -2558,19 +2567,39 @@ router.get('/pl', adminAuth, async (req, res) => {
             !(e.note && e.note.toLowerCase().includes('salary slip')))
         .reduce((s, e) => s + e.amount, 0);
 
-    // Net profit = collected - salary paid - pl expenses - fund topups - material from slips
-    const netProfit = totalCollected - totalSalaryPaid - totalPlExpenses
+    // Net profit = collected - total salary paid (slips + manual) - pl expenses - fund topups - material from slips
+    const netProfit = totalCollected - totalSalaryPaidWithManual - totalPlExpenses
         - materialTopups - bdTopups - materialFromSlips;
 
     res.json({
       month, year,
       revenue: { invoiced: totalInvoiced, collected: totalCollected, outstanding: totalOutstanding },
-      salary:  { payable: totalSalaryPayable, paid: totalSalaryPaid, pending: totalSalaryPending },
+      salary:  {
+        fromSlips:     totalSalaryPayable,
+        manual:        totalManualSalary,
+        payable:       totalSalaryWithManual,
+        paid:          totalSalaryPaidWithManual,
+        pending:       totalSalaryPending,
+      },
       fundAllocations: { material: materialTopups, bd: bdTopups, materialFromSlips },
       expensesByCategory: byCategory,
       totalPlExpenses,
       netProfit,
     });
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── PUT /admin/employees/:id/active — toggle employee active status ───────────
+router.put('/employees/:id/active', adminAuth, async (req, res) => {
+  try {
+    const { isActive } = req.body;
+    const emp = await User.findByIdAndUpdate(
+      req.params.id,
+      { $set: { isActive: !!isActive } },
+      { new: true }
+    ).select('-password');
+    if (!emp) return res.status(404).send('Not found');
+    res.json(emp);
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
 
