@@ -1659,7 +1659,8 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
 
     const configDoc = await Config.findOne({ key: 'invoicePricing' });
     const pricing   = configDoc?.value || {};
-    const customers = await Customer.find({ isActive: { $ne: false } });
+    // Fetch ALL customers — inactive ones shown only if they have existing invoices
+    const customers = await Customer.find({});
 
     const allJobsRaw = await Job.find({
       assignedDate: {
@@ -1680,7 +1681,11 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
     const existingInvoices = await Invoice.find({ month, year });
     const invoiceByCustomer = {};
     for (const inv of existingInvoices) {
-      invoiceByCustomer[inv.customerId.toString()] = inv;
+      const cid = inv.customerId.toString();
+      // Prefer combined invoice over individual if both exist
+      if (!invoiceByCustomer[cid] || inv.isCombined) {
+        invoiceByCustomer[cid] = inv;
+      }
     }
 
     // Track which groupIds we've already added to avoid duplicate group cards
@@ -1695,70 +1700,93 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
       if (customer.carGroupId && customer.carGroupId.toString().trim() !== '') {
         const gid = customer.carGroupId.toString();
         if (processedGroups.has(gid)) continue;
-        processedGroups.add(gid);
 
         // Find all group members
         const members = customers.filter(c =>
             c.carGroupId && c.carGroupId.toString() === gid);
 
-        // Check if any member has activity this month
-        const hasActivity = members.some(m =>
-            (jobsByCustomer[m._id.toString()] || []).length > 0);
-        if (!hasActivity) continue;
-
-        // Use first member with payment contact as the primary
-        const primary = members.find(m => m.paymentContact?.number)
-            || members[0];
-        const primaryCid = primary._id.toString();
-
-        // Find existing combined invoice
-        const existing = existingInvoices.find(inv =>
-            inv.isCombined && inv.carGroupId &&
-            inv.carGroupId.toString() === gid);
-
-        // Compute combined total fresh
-        let combinedTotal = 0;
-        const memberNames = [];
-        for (const m of members) {
-          const mJobs = jobsByCustomer[m._id.toString()] || [];
-          const comp  = await computeCustomerInvoice(m, mJobs, pricing);
-          combinedTotal += comp.grandTotal;
-          memberNames.push(m.customerName);
-        }
-
-        result.push({
-          customerId:       primaryCid,
-          customerName:     primary.customerName,
-          vehicleNumber:    primary.vehicleNumber,
-          carModel:         primary.carModel,
-          carType:          primary.carType,
-          customerPhone:    primary.phone,
-          paymentContact:   primary.paymentContact || null,
-          hasPaymentContact: !!(primary.paymentContact?.number),
-          carGroupId:       customer.carGroupId,
-          groupMemberNames: memberNames,
-          isGroupCard:      true,
-          invoiceId:        existing?._id || null,
-          invoiceNumber:    existing?.invoiceNumber || null,
-          shared:           existing?.shared || false,
-          sharedAt:         existing?.sharedAt || null,
-          paymentCollected: existing?.paymentCollected || false,
-          collectedAt:      existing?.collectedAt || null,
-          grandTotal:       existing?.grandTotal ?? combinedTotal,
-          displayTotal:     (existing?.shared || existing?.paymentCollected)
-              ? (existing?.grandTotal ?? combinedTotal)
-              : combinedTotal,
-          discountAmount:   existing?.discountAmount || 0,
-          isCombined:       true,
+        // If ANY member has an individual invoice this month — skip group card
+        // and let each member render as individual card below
+        const anyMemberHasIndividualInvoice = members.some(m => {
+          const inv = invoiceByCustomer[m._id.toString()];
+          return inv && !inv.isCombined;
         });
-        continue;
+        if (anyMemberHasIndividualInvoice) {
+          // Don't add to processedGroups — let individual cards render
+          // Fall through to individual rendering below
+        } else {
+          processedGroups.add(gid);
+
+          // Check if any member has activity this month
+          const hasActivity = members.some(m =>
+              (jobsByCustomer[m._id.toString()] || []).length > 0);
+          if (!hasActivity) continue;
+
+          // Use first member with payment contact as the primary
+          const primary = members.find(m => m.paymentContact?.number)
+              || members[0];
+          const primaryCid = primary._id.toString();
+
+          // Find existing combined invoice
+          const existing = existingInvoices.find(inv =>
+              inv.isCombined && inv.carGroupId &&
+              inv.carGroupId.toString() === gid);
+
+          // Compute combined total fresh
+          let combinedTotal = 0;
+          const memberNames = [];
+          for (const m of members) {
+            const mJobs = jobsByCustomer[m._id.toString()] || [];
+            const comp  = await computeCustomerInvoice(m, mJobs, pricing);
+            combinedTotal += comp.grandTotal;
+            memberNames.push(m.customerName);
+          }
+
+          result.push({
+            customerId:       primaryCid,
+            customerName:     primary.customerName,
+            vehicleNumber:    primary.vehicleNumber,
+            carModel:         primary.carModel,
+            carType:          primary.carType,
+            customerPhone:    primary.phone,
+            paymentContact:   primary.paymentContact || null,
+            hasPaymentContact: !!(primary.paymentContact?.number),
+            carGroupId:       customer.carGroupId,
+            groupMemberNames: memberNames,
+            isGroupCard:      true,
+            invoiceId:        existing?._id || null,
+            invoiceNumber:    existing?.invoiceNumber || null,
+            shared:           existing?.shared || false,
+            sharedAt:         existing?.sharedAt || null,
+            paymentCollected: existing?.paymentCollected || false,
+            collectedAt:      existing?.collectedAt || null,
+            grandTotal:       existing?.grandTotal ?? combinedTotal,
+            displayTotal:     (existing?.shared || existing?.paymentCollected)
+                ? (existing?.grandTotal ?? combinedTotal)
+                : combinedTotal,
+            discountAmount:   existing?.discountAmount || 0,
+            isCombined:       true,
+          });
+          continue;
+        }
       }
 
       // Individual customer (no group)
-      if (jobs.length === 0) continue;
-
-      const computed = await computeCustomerInvoice(customer, jobs, pricing);
       const existing = invoiceByCustomer[cid];
+      const isInactive = customer.isActive === false;
+
+      // Skip inactive customers with no existing invoice this month
+      if (isInactive && !existing) continue;
+      // Skip active customers with no jobs and no invoice
+      if (!isInactive && jobs.length === 0 && !existing) continue;
+      // Skip active customers with no jobs (no invoice possible)
+      if (!isInactive && jobs.length === 0) continue;
+
+      const computed = existing
+          ? await computeCustomerInvoice(customer, jobs, pricing)
+          : { grandTotal: 0, lineItems: [], extAttempted: 0, extCleaned: 0,
+              extCancelled: 0, intAttempted: 0, intCleaned: 0, intCancelled: 0,
+              attempted: 0, cleaned: 0, cancelled: 0, computedTotal: 0 };
       const hasPaymentContact = !!(customer.paymentContact?.number);
 
       result.push({
@@ -1773,6 +1801,7 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
         carGroupId:       null,
         isGroupCard:      false,
         isCombined:       false,
+        isInactive:       isInactive,
         ...computed,
         invoiceId:        existing?._id || null,
         invoiceNumber:    existing?.invoiceNumber || null,
@@ -1803,13 +1832,39 @@ router.get('/invoice/metrics', adminAuth, async (req, res) => {
     const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
     const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
 
-    const invoices = await Invoice.find({ month, year });
+    const allInvoices = await Invoice.find({ month, year });
 
-    const totalRevenue   = invoices.reduce((s, i) => s + (i.grandTotal || 0), 0);
-    const totalCollected = invoices
+    // Exclude individual invoices for customers who have a combined invoice
+    // Combined invoice supersedes individual invoices for those customers
+    const combinedInvoices = allInvoices.filter(i => i.isCombined);
+    const combinedCustomerIds = new Set();
+    for (const ci of combinedInvoices) {
+      // The primary customer ID is on the combined invoice
+      combinedCustomerIds.add(ci.customerId.toString());
+      // Also exclude linked customers — fetch from carStats if available
+      if (ci.carStats && ci.carStats.length > 0) {
+        for (const cs of ci.carStats) {
+          combinedCustomerIds.add(cs.customerId.toString());
+        }
+      }
+    }
+
+    // Use only the authoritative invoice per customer:
+    // - If customer has a combined invoice → use combined
+    // - If customer has individual invoice only → use individual
+    const invoices = allInvoices.filter(i => {
+      if (i.isCombined) return true; // always include combined
+      // Exclude individual if superseded by combined
+      return !combinedCustomerIds.has(i.customerId.toString());
+    });
+
+    // Only shared invoices count as revenue
+    const sharedInvoices = invoices.filter(i => i.shared || i.paymentCollected);
+    const totalRevenue   = sharedInvoices.reduce((s, i) => s + (i.grandTotal || 0), 0);
+    const totalCollected = sharedInvoices
       .filter(i => i.paymentCollected)
       .reduce((s, i) => s + (i.grandTotal || 0), 0);
-    const totalPending   = Math.round((totalRevenue - totalCollected) * 100) / 100;
+    const totalPending   = Math.round(totalRevenue - totalCollected);
 
     // Always use config contacts as source of truth — match by phone number
     const pricingDoc     = await Config.findOne({ key: 'invoicePricing' });
@@ -1832,6 +1887,7 @@ router.get('/invoice/metrics', adminAuth, async (req, res) => {
     }
 
     for (const inv of invoices) {
+      if (!inv.shared && !inv.paymentCollected) continue; // skip unshared
       const num  = (inv.paymentContact?.number || '').trim();
       // Resolve to canonical name via phone number
       const name = phoneToName[num] || (inv.paymentContact?.name || '').trim();
@@ -2505,13 +2561,27 @@ router.get('/pl', adminAuth, async (req, res) => {
     const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
     const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
 
-    // Revenue from invoices
-    const invoices = await Invoice.find({ month, year, isCombined: { $ne: true } });
-    const combinedInvoices = await Invoice.find({ month, year, isCombined: true });
-    const allInvoices = [...invoices, ...combinedInvoices];
+    // Revenue from invoices — exclude individual invoices superseded by combined
+    const allInvoices = await Invoice.find({ month, year });
+    const combinedInvs = allInvoices.filter(i => i.isCombined);
+    const combinedCustIds = new Set();
+    for (const ci of combinedInvs) {
+      combinedCustIds.add(ci.customerId.toString());
+      if (ci.carStats && ci.carStats.length > 0) {
+        for (const cs of ci.carStats) {
+          combinedCustIds.add(cs.customerId.toString());
+        }
+      }
+    }
+    const invoices = allInvoices.filter(i => {
+      if (i.isCombined) return true;
+      return !combinedCustIds.has(i.customerId.toString());
+    });
 
-    const totalInvoiced   = allInvoices.reduce((s, i) => s + (i.grandTotal || 0), 0);
-    const totalCollected  = allInvoices
+    // Only shared invoices count as revenue (unshared = not billed to customer)
+    const billedInvoices  = invoices.filter(i => i.shared || i.paymentCollected);
+    const totalInvoiced   = billedInvoices.reduce((s, i) => s + (i.grandTotal || 0), 0);
+    const totalCollected  = billedInvoices
         .filter(i => i.paymentCollected)
         .reduce((s, i) => s + (i.grandTotal || 0), 0);
     const totalOutstanding = totalInvoiced - totalCollected;
