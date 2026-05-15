@@ -2463,10 +2463,10 @@ router.put('/salary-slip/:slipId/mark-shared', adminAuth, async (req, res) => {
 // ── GET /admin/expenses?month=&year= ─────────────────────────────────────────
 router.get('/expenses', adminAuth, async (req, res) => {
   try {
-    const ist   = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
-    const month = parseInt(req.query.month) || (ist.getUTCMonth() + 1);
-    const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
-    const expenses = await Expense.find({ month, year }).sort({ date: -1 });
+    const filter = {};
+    if (req.query.month) filter.month = parseInt(req.query.month);
+    if (req.query.year)  filter.year  = parseInt(req.query.year);
+    const expenses = await Expense.find(filter).sort({ year: -1, month: -1, date: -1 });
     res.json(expenses);
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
