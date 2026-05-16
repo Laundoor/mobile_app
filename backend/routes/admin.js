@@ -223,9 +223,13 @@ router.post('/employees', adminAuth, async (req, res) => {
 router.get('/employees', adminAuth, async (req, res) => {
   try {
     const { includeInactive } = req.query;
-    const today     = todayIST();
-    const filter    = { role: 'employee' };
-    if (includeInactive !== 'true') filter.isActive = true;
+    const today  = todayIST();
+    const filter = { role: 'employee' };
+    if (includeInactive === 'true') {
+      filter.isActive = false; // only inactive
+    } else {
+      filter.isActive = true;  // only active (default)
+    }
     const employees = await User.find(filter).select('-password');
     const allJobs   = await Job.find({ assignedDate: today });
     const result = employees.map(emp => {
@@ -1732,13 +1736,19 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
               inv.isCombined && inv.carGroupId &&
               inv.carGroupId.toString() === gid);
 
-          // Compute combined total fresh
-          let combinedTotal = 0;
+          // Compute combined total fresh — sum counts across all members
+          let combinedTotal    = 0;
+          let combinedAttempted = 0;
+          let combinedCleaned  = 0;
+          let combinedCancelled = 0;
           const memberNames = [];
           for (const m of members) {
             const mJobs = jobsByCustomer[m._id.toString()] || [];
             const comp  = await computeCustomerInvoice(m, mJobs, pricing);
-            combinedTotal += comp.grandTotal;
+            combinedTotal     += comp.grandTotal;
+            combinedAttempted += comp.attempted  || 0;
+            combinedCleaned   += comp.cleaned    || 0;
+            combinedCancelled += comp.cancelled  || 0;
             memberNames.push(m.customerName);
           }
 
@@ -1754,6 +1764,9 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
             carGroupId:       customer.carGroupId,
             groupMemberNames: memberNames,
             isGroupCard:      true,
+            attempted:        combinedAttempted,
+            cleaned:          combinedCleaned,
+            cancelled:        combinedCancelled,
             invoiceId:        existing?._id || null,
             invoiceNumber:    existing?.invoiceNumber || null,
             shared:           existing?.shared || false,
