@@ -1465,7 +1465,7 @@ router.get('/interior/history', adminAuth, async (req, res) => {
 });
 
 // ── POST /admin/jobs/:jobId/revert ────────────────────────────────────────────
-// Reverts an In Progress or Completed job back to Pending.
+// Reverts an In Progress, Completed or Cancelled job back to Pending.
 // Clears all photo fields and timestamps in DB (S3 files kept).
 // If job was Completed, decrements customer serviceCount.
 // Blocked if complaint is raised on the job.
@@ -1474,8 +1474,8 @@ router.post('/jobs/:jobId/revert', adminAuth, async (req, res) => {
     const job = await Job.findById(req.params.jobId);
     if (!job) return res.status(404).send("Job not found");
 
-    if (!['In Progress', 'Completed'].includes(job.status)) {
-      return res.status(400).send("Only In Progress or Completed jobs can be reverted");
+    if (!['In Progress', 'Completed', 'Cancelled'].includes(job.status)) {
+      return res.status(400).send("Only In Progress, Completed or Cancelled jobs can be reverted");
     }
     if (job.complaint?.raised) {
       return res.status(400).send(
@@ -1490,6 +1490,9 @@ router.post('/jobs/:jobId/revert', adminAuth, async (req, res) => {
         status:                 'Pending',
         beforeUploadedAt:       null,
         completedAt:            null,
+        cancelledAt:            null,
+        cancelPhotoUrl:         null,
+        cancelReason:           null,
         serviceCount:           0,
         'images.before':        null,
         'images.after':         [],
