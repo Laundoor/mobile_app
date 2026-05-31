@@ -1364,9 +1364,10 @@ router.get('/interior/todo', adminAuth, async (req, res) => {
     const prevFrom  = new Date(prevYear, prevMonth - 1, 1);
     const prevTo    = new Date(prevYear, prevMonth, 1);
 
-    // All customers with interior type set
+    // All active customers with interior type set
     const customers = await Customer.find({
-      interiorType: { $in: ['Interior Standard', 'Interior Premium'] }
+      interiorType: { $in: ['Interior Standard', 'Interior Premium'] },
+      isActive: { $ne: false },
     });
 
     // Jobs completed this month that are interior type
@@ -1798,7 +1799,7 @@ router.get('/invoice/list', adminAuth, async (req, res) => {
       // Skip active customers with no jobs (no invoice possible)
       if (!isInactive && jobs.length === 0) continue;
 
-      const computed = existing
+      const computed = jobs.length > 0
           ? await computeCustomerInvoice(customer, jobs, pricing)
           : { grandTotal: 0, lineItems: [], extAttempted: 0, extCleaned: 0,
               extCancelled: 0, intAttempted: 0, intCleaned: 0, intCancelled: 0,
@@ -2202,7 +2203,7 @@ router.post('/invoice/generate-combined/:customerId', adminAuth, async (req, res
     const year  = parseInt(req.query.year)  || ist.getUTCFullYear();
 
     const { discountFlat = 0, discountPct = 0,
-            discountReason = '', adjustment = 0 } = req.body;
+            discountReason = '', adjustments = {} } = req.body;
 
     const cust = await Customer.findById(req.params.customerId);
     if (!cust) return res.status(404).send('Customer not found');
@@ -2228,7 +2229,7 @@ router.post('/invoice/generate-combined/:customerId', adminAuth, async (req, res
       carResults.push({ member, comp });
     }
 
-    // Build line items grouped by car
+    // Build line items grouped by car — apply per-car adjustments
     const allLineItems = [];
     for (const { member, comp } of carResults) {
       const name = member.customerName.split('-')[0].trim();
@@ -2236,20 +2237,19 @@ router.post('/invoice/generate-combined/:customerId', adminAuth, async (req, res
         ? member.customerName.split('-').slice(1).join('-').trim()
         : member.carModel;
       const carLabel = car ? `${name} — ${car}` : name;
+      const carAdj   = Math.round(adjustments[member._id.toString()] || 0);
+      let adjApplied = false;
       for (const item of comp.lineItems) {
-        allLineItems.push({ ...item, car: carLabel });
+        const amt = item.amount + (!adjApplied && carAdj !== 0 &&
+            ['Hatchback','Sedan','SUV'].includes(item.label) ? carAdj : 0);
+        if (!adjApplied && carAdj !== 0 &&
+            ['Hatchback','Sedan','SUV'].includes(item.label)) adjApplied = true;
+        allLineItems.push({ ...item, amount: amt, car: carLabel });
       }
     }
 
-    // Apply adjustment to first exterior line item
-    const adjAmt = Math.round(adjustment || 0);
-    if (adjAmt !== 0) {
-      const extIdx = allLineItems.findIndex(i =>
-        ['Hatchback','Sedan','SUV'].includes(i.label));
-      if (extIdx !== -1) allLineItems[extIdx].amount += adjAmt;
-    }
-
-    const rawSubtotal    = carResults.reduce((s, r) => s + r.comp.grandTotal, 0) + adjAmt;
+    const rawSubtotal    = carResults.reduce((s, r) => r.comp.grandTotal +
+        Math.round(adjustments[r.member._id.toString()] || 0) + s, 0);
     const pctAmt         = Math.round(rawSubtotal * (discountPct / 100));
     const flatAmt        = Math.round(discountFlat);
     const discountAmount = pctAmt + flatAmt;
