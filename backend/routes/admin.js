@@ -682,7 +682,8 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
     const month = parseInt(req.query.month) || new Date().getMonth() + 1;
     const year  = parseInt(req.query.year)  || new Date().getFullYear();
 
-    const curMonth = `${year}-${String(month).padStart(2,'0')}`;
+    const from = new Date(year, month - 1, 1);
+    const to   = new Date(year, month, 1);
 
     const employee = await User.findById(employeeId).select('-password');
     if (!employee) return res.status(404).json({ error: 'Employee not found' });
@@ -692,22 +693,30 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
 
     const jobs = await Job.find({
       employeeId,
-      status:       { $in: ['Completed', 'Cancelled'] },
-      assignedDate: { $regex: `^${curMonth}` }, // IST string — no timezone issues
+      status:      { $in: ['Completed', 'Cancelled'] },
+      $or: [
+        { completedAt: { $gte: from, $lt: to } },
+        { cancelledAt: { $gte: from, $lt: to } },
+      ],
     }).populate('customerId', 'customerName carType carModel vehicleNumber mapsLink location');
 
     // Helper: job earns wages only if completed with no unresolved complaint
+    // Job earns wages only if completed with no complaint,
+    // or complaint was manually resolved (same employee fixed it).
+    // resolvedByReassign = true means another employee did the work — not payable.
     const isPayable = (job) =>
       job.status === 'Completed' &&
       (!job.complaint?.raised ||
         (job.complaint?.resolved === true &&
          !job.complaint?.resolvedByReassign));
 
-    // Group by assignedDate string (already IST) — no timestamp conversion needed
+    // Group by date (IST) — only payable jobs count for distance
     const byDate = {};
     for (const job of jobs) {
-      const dk = job.assignedDate;
-      if (!dk) continue;
+      const ts  = job.completedAt || job.cancelledAt;
+      if (!ts) continue;
+      const ist = new Date(ts.getTime() + 5.5 * 60 * 60 * 1000);
+      const dk  = ist.toISOString().split('T')[0];
       if (!byDate[dk]) byDate[dk] = [];
       byDate[dk].push(job);
     }
@@ -928,6 +937,7 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
     }
 
     // ── Attendance — days worked + total working days ────────────────────────
+    const curMonth    = `${year}-${String(month).padStart(2,'0')}`;
     const attendances = await Attendance.find({
       employeeId,
       date: {
