@@ -473,35 +473,32 @@ router.get('/my-salary/:employeeId', async (req, res) => {
     const emp = await User.findById(req.params.employeeId).select('homeLocation');
     const home = emp?.homeLocation?.lat ? emp.homeLocation : null;
 
-    // Completed + cancelled jobs this month (need cancelled for distance)
+    const pad      = n => String(n).padStart(2, '0');
+    const curMonth = `${year}-${pad(month)}`;
+
+    // Completed + cancelled jobs this month — use assignedDate string (IST, no timezone issues)
     const allJobs = await Job.find({
-      employeeId: req.params.employeeId,
-      status:     { $in: ['Completed', 'Cancelled'] },
-      $or: [
-        { completedAt: { $gte: from, $lt: to } },
-        { cancelledAt: { $gte: from, $lt: to } },
-      ],
+      employeeId:   req.params.employeeId,
+      status:       { $in: ['Completed', 'Cancelled'] },
+      assignedDate: { $regex: `^${curMonth}` },
     }).populate('customerId', 'carType location mapsLink');
 
-    // Group by IST date using completedAt or cancelledAt
+    // Group by assignedDate string — already IST, no conversion needed
     const byDate = {};
     for (const job of allJobs) {
-      const ts  = job.completedAt || job.cancelledAt;
-      if (!ts) continue;
-      const ist = new Date(ts.getTime() + 5.5 * 60 * 60 * 1000);
-      const dk  = ist.toISOString().split('T')[0];
+      const dk = job.assignedDate;
+      if (!dk) continue;
       if (!byDate[dk]) byDate[dk] = [];
       byDate[dk].push(job);
     }
 
     // Attendance records for incentive check
     const Attendance = require('../models/attendance');
-    const pad = n => String(n).padStart(2, '0');
     const attRecords = await Attendance.find({
       employeeId: req.params.employeeId,
       date: {
-        $gte: `${year}-${pad(month)}-01`,
-        $lte: `${year}-${pad(month)}-${pad(new Date(year, month, 0).getDate())}`,
+        $gte: `${curMonth}-01`,
+        $lte: `${curMonth}-${pad(new Date(year, month, 0).getDate())}`,
       },
     });
     const attMap = {};
