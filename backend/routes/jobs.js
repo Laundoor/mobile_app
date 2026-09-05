@@ -212,6 +212,25 @@ router.put('/:id/status', async (req, res) => {
     // Idempotency guard — if already in this status, return as-is without side effects
     if (job.status === status) return res.json(job);
 
+    // ── Sequential lock — must complete previous cars first ───────────────────
+    if (status === 'In Progress' && job.sortOrder > 0) {
+      const previousJobs = await Job.find({
+        employeeId:   job.employeeId,
+        assignedDate: job.assignedDate,
+        sortOrder:    { $lt: job.sortOrder, $gt: 0 },
+      });
+      const incomplete = previousJobs.filter(
+          j => j.status !== 'Completed' && j.status !== 'Cancelled');
+      if (incomplete.length > 0) {
+        const sorted = incomplete.sort((a, b) => a.sortOrder - b.sortOrder);
+        return res.status(400).json({
+          code:      'SEQUENTIAL_LOCK',
+          message:   `Please complete Car #${sorted[0].sortOrder} first`,
+          blockedBy: sorted[0]._id,
+        });
+      }
+    }
+
     // Block completion of interior jobs unless all 8 after photos uploaded
     if (status === 'Completed') {
       const isInterior = job.serviceType === 'Interior Standard' ||
