@@ -263,7 +263,7 @@ router.get('/employees/:id', adminAuth, async (req, res) => {
 // PUT /admin/employees/:id — update employee including home location
 router.put('/employees/:id', adminAuth, async (req, res) => {
   try {
-    const { homeMapsLink, ...rest } = req.body;
+    const { homeMapsLink, isActive, role, supervisorId, ...rest } = req.body; // strip fields managed by dedicated endpoints
     const updates = { ...rest };
     if (homeMapsLink !== undefined) {
       const coords = await extractLatLng(homeMapsLink);
