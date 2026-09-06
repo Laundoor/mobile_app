@@ -459,12 +459,92 @@ router.get('/day-summary/:employeeId', async (req, res) => {
       hoursWorked = (lastTime - firstTime) / (1000 * 60 * 60);
     }
 
+    // ── Supervisor extras: inspections + warehouse visit ─────────────────────
+    // Only computed when role === supervisor — zero cost for regular employees
+    let supervisorTimeline = null;
+    if (emp?.role === 'supervisor') {
+      const Warehouse = require('../models/warehouse');
+      const Attendance = require('../models/attendance');
+
+      // All jobs this supervisor inspected today
+      const inspectedJobs = await Job.find({
+        assignedDate:               today,
+        'inspections.supervisorId': req.params.employeeId,
+      }).populate('customerId', 'customerName carModel vehicleNumber');
+
+      // Build inspection events
+      const inspectionEvents = [];
+      for (const ij of inspectedJobs) {
+        const myInspection = ij.inspections.find(
+          i => i.supervisorId.toString() === req.params.employeeId
+        );
+        if (myInspection) {
+          inspectionEvents.push({
+            type:         'inspection',
+            jobId:        ij._id,
+            customerName: ij.customerId?.customerName || '',
+            carModel:     ij.customerId?.carModel     || '',
+            vehicleNo:    ij.customerId?.vehicleNumber || '',
+            photoUrl:     myInspection.photoUrl,
+            time:         myInspection.inspectedAt,
+          });
+        }
+      }
+
+      // Warehouse visit
+      const att = await Attendance.findOne({
+        employeeId: req.params.employeeId, date: today,
+      });
+      let warehouseEvent = null;
+      if (att?.warehouseVisit?.visitedAt) {
+        const wh = await Warehouse.findById(att.warehouseVisit.warehouseId);
+        warehouseEvent = {
+          type:          'warehouse',
+          warehouseName: wh?.name || '',
+          warehouseId:   att.warehouseVisit.warehouseId,
+          photoUrl:      att.warehouseVisit.photoUrl,
+          time:          att.warehouseVisit.visitedAt,
+        };
+      }
+
+      // Merge and sort chronologically
+      const allEvents = [...inspectionEvents];
+      if (warehouseEvent) allEvents.push(warehouseEvent);
+      allEvents.sort((a, b) =>
+        new Date(a.time).getTime() - new Date(b.time).getTime()
+      );
+
+      supervisorTimeline = {
+        inspectionCount: inspectionEvents.length,
+        warehouseVisited: !!warehouseEvent,
+        events: allEvents,
+      };
+
+      // Also add warehouse waypoint to distance if visited
+      if (warehouseEvent && emp?.homeLocation?.lat && att?.warehouseVisit?.visitedAt) {
+        const wh = await Warehouse.findById(att.warehouseVisit.warehouseId);
+        if (wh?.location?.lat) {
+          // Simple haversine addition for warehouse leg — not worth a full API re-call
+          const home = emp.homeLocation;
+          const wp   = wh.location;
+          const dLat = (wp.lat - home.lat) * Math.PI / 180;
+          const dLng = (wp.lng - home.lng) * Math.PI / 180;
+          const a = Math.sin(dLat/2)**2 +
+            Math.cos(home.lat*Math.PI/180) * Math.cos(wp.lat*Math.PI/180) *
+            Math.sin(dLng/2)**2;
+          const whKm = 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+          distanceKm += whKm * 2; // to and from warehouse
+        }
+      }
+    }
+
     res.json({
       total,
       completed,
       cancelled,
       distanceKm:  Math.round(distanceKm * 10) / 10,
       hoursWorked: Math.round(hoursWorked * 10) / 10,
+      ...(supervisorTimeline ? { supervisorTimeline } : {}),
     });
   } catch (err) {
     console.error(err);
