@@ -183,7 +183,7 @@ const DEFAULT_PRICING = {
 router.get('/dashboard', adminAuth, async (req, res) => {
   try {
     const today     = todayIST();
-    const employees = await User.find({ role: 'employee' }).select('-password');
+    const employees = await User.find({ role: { $in: ['employee', 'supervisor'] } }).select('-password');
     const allJobs   = await Job.find({ assignedDate: today });
     const data = employees.map(emp => {
       const empJobs       = allJobs.filter(j => j.employeeId.toString() === emp._id.toString());
@@ -224,7 +224,7 @@ router.get('/employees', adminAuth, async (req, res) => {
   try {
     const { includeInactive } = req.query;
     const today  = todayIST();
-    const filter = { role: 'employee' };
+    const filter = { role: { $in: ['employee', 'supervisor'] } };
     if (includeInactive === 'true') {
       filter.isActive = false; // only inactive
     } else {
