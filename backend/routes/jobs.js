@@ -75,10 +75,11 @@ async function computeIncentiveFull(record, employeeId, date, pricing, role) {
     ).length;
     if (inspectionCount < minInspections) reasons.push('minInspections');
   } else {
-    // Employee: minimum 5 completed cars
+    // Employee: minimum cars cleaned (configurable)
+    const minCars = pricing.minCarsEmployee ?? 5;
     const completedCount = await Job.countDocuments({
       employeeId, assignedDate: date, status: 'Completed' });
-    if (completedCount < 5) reasons.push('minCars');
+    if (completedCount < minCars) reasons.push('minCars');
   }
 
   // No complaints raised that day (unresolved OR resolved by reassignment)

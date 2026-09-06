@@ -171,10 +171,13 @@ async function computeDayDistanceKm(points) {
 
 const DEFAULT_PRICING = {
   exterior: { Hatchback: 20, Sedan: 25, SUV: 30 },
-  interiorStandard: 40,
-  interiorPremium:  60,
-  distancePerKm:    2,
-  dailyIncentive:   100,
+  interiorStandard:        40,
+  interiorPremium:         60,
+  distancePerKm:           2,
+  dailyIncentive:          100,
+  minCarsEmployee:         5,   // min cars cleaned for employee incentive
+  supervisorIncentive:     100, // daily incentive amount for supervisors
+  supervisorMinInspections:10,  // min inspections for supervisor incentive
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1175,11 +1178,12 @@ async function computeIncentive(record, employeeId, date, pricing, role) {
     ).length;
     if (inspectionCount < minInspections) reasons.push('minInspections');
   } else {
-    // 6. Minimum 5 completed cars for the day
+    // 6. Minimum cars cleaned for the day (configurable)
+    const minCars = pricing.minCarsEmployee ?? 5;
     const completedCount = await Job.countDocuments({
       employeeId, assignedDate: date, status: 'Completed',
     });
-    if (completedCount < 5) reasons.push('minCars');
+    if (completedCount < minCars) reasons.push('minCars');
   }
 
   // 7. No complaints raised that day (unresolved OR resolved by reassignment)
