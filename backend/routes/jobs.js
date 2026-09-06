@@ -14,8 +14,12 @@ function todayIST() {
 
 // Full incentive computation — mirrors computeIncentive() in admin.js exactly
 // Must stay in sync with admin.js whenever criteria change
-async function computeIncentiveFull(record, employeeId, date, pricing) {
-  const incentiveAmt = pricing.dailyIncentive ?? 100;
+// Supervisor: replaces minCars with minInspections check
+async function computeIncentiveFull(record, employeeId, date, pricing, role) {
+  const isSupervisor = role === 'supervisor';
+  const incentiveAmt = isSupervisor
+    ? (pricing.supervisorIncentive ?? pricing.dailyIncentive ?? 100)
+    : (pricing.dailyIncentive ?? 100);
   const isSaturday   = new Date(date + 'T12:00:00Z').getUTCDay() === 6;
   const reasons      = [];
 
@@ -33,17 +37,24 @@ async function computeIncentiveFull(record, employeeId, date, pricing) {
     else if (record.dusterSoakApproval !== 'approved') reasons.push('dusterSoak');
   }
 
-  // Before photo of first job on or before 06:15 IST
+  // Login time: earliest of firstJob.beforeUploadedAt OR warehouseVisit.visitedAt
   // If sortOrder:1 job was cancelled (no beforeUploadedAt), use its cancelledAt
   // or fall back to the next job with a beforeUploadedAt
   const firstJob = await Job.findOne({ employeeId, assignedDate: date })
     .sort({ sortOrder: 1 });
-  const startTs = firstJob?.beforeUploadedAt
+  const jobStartTs = firstJob?.beforeUploadedAt
     || (firstJob?.status === 'Cancelled' ? firstJob?.cancelledAt : null)
     || (await Job.findOne({
           employeeId, assignedDate: date,
           beforeUploadedAt: { $ne: null }
         }).sort({ beforeUploadedAt: 1 }))?.beforeUploadedAt;
+
+  // For supervisors also consider warehouse visit time as a valid login trigger
+  const warehouseTs = record.warehouseVisit?.visitedAt || null;
+  const startTs = jobStartTs && warehouseTs
+    ? (new Date(jobStartTs) < new Date(warehouseTs) ? jobStartTs : warehouseTs)
+    : (jobStartTs || warehouseTs);
+
   if (startTs) {
     const ist  = new Date(new Date(startTs).getTime() + 5.5 * 60 * 60 * 1000);
     const hhmm = ist.getUTCHours() * 60 + ist.getUTCMinutes();
@@ -52,10 +63,23 @@ async function computeIncentiveFull(record, employeeId, date, pricing) {
     reasons.push('late'); // no timestamp at all
   }
 
-  // Minimum 5 completed cars
-  const completedCount = await Job.countDocuments({
-    employeeId, assignedDate: date, status: 'Completed' });
-  if (completedCount < 5) reasons.push('minCars');
+  if (isSupervisor) {
+    // Supervisor: min inspections instead of min cars
+    const minInspections = pricing.supervisorMinInspections ?? 10;
+    const inspectedJobs  = await Job.find({
+      assignedDate:               date,
+      'inspections.supervisorId': employeeId,
+    });
+    const inspectionCount = inspectedJobs.filter(j =>
+      j.inspections.some(i => i.supervisorId.toString() === employeeId.toString())
+    ).length;
+    if (inspectionCount < minInspections) reasons.push('minInspections');
+  } else {
+    // Employee: minimum 5 completed cars
+    const completedCount = await Job.countDocuments({
+      employeeId, assignedDate: date, status: 'Completed' });
+    if (completedCount < 5) reasons.push('minCars');
+  }
 
   // No complaints raised that day (unresolved OR resolved by reassignment)
   const complainedJob = await Job.findOne({
@@ -72,6 +96,7 @@ async function computeIncentiveFull(record, employeeId, date, pricing) {
     earned:    reasons.length === 0,
     amount:    reasons.length === 0 ? incentiveAmt : 0,
     isSaturday,
+    isSupervisor,
     reasons,
   };
 }
@@ -489,9 +514,10 @@ router.get('/my-salary/:employeeId', async (req, res) => {
       distancePerKm: 2, dailyIncentive: 100,
     };
 
-    // Fetch employee for home location
-    const emp = await User.findById(req.params.employeeId).select('homeLocation');
+    // Fetch employee for home location and role
+    const emp  = await User.findById(req.params.employeeId).select('homeLocation role');
     const home = emp?.homeLocation?.lat ? emp.homeLocation : null;
+    const role = emp?.role || 'employee';
 
     const pad      = n => String(n).padStart(2, '0');
     const curMonth = `${year}-${pad(month)}`;
@@ -562,21 +588,81 @@ router.get('/my-salary/:employeeId', async (req, res) => {
         else counts['Hatchback']++;
       }
 
-      // Build route points — payable completed + cancelled jobs
+      // Build route points — for supervisors include inspections + warehouse visit
+      // sorted chronologically by timestamp
       let routePoints = null;
       if (home) {
-        const sorted = dayJobs
-          .filter(j =>
-            ((j.status === 'Completed' && isPayable(j)) ||
-              j.status === 'Cancelled') &&
-            j.customerId?.location?.lat)
-          .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
-        if (sorted.length > 0) {
-          const waypoints = sorted.map(j => ({
-            lat: j.customerId.location.lat,
-            lng: j.customerId.location.lng,
-          }));
-          routePoints = [home, ...waypoints, home];
+        const attRec = attMap[date];
+
+        if (role === 'supervisor') {
+          // Collect all waypoints with timestamps for chronological sort
+          const waypointEvents = [];
+
+          // Own washing jobs (completed/cancelled)
+          for (const j of dayJobs) {
+            if (((j.status === 'Completed' && isPayable(j)) || j.status === 'Cancelled') &&
+                j.customerId?.location?.lat) {
+              const ts = j.completedAt || j.cancelledAt;
+              waypointEvents.push({
+                lat: j.customerId.location.lat,
+                lng: j.customerId.location.lng,
+                ts:  ts ? new Date(ts).getTime() : 0,
+              });
+            }
+          }
+
+          // Inspection locations — use the job's customer location + inspectedAt
+          // Fetch all jobs this supervisor inspected today
+          const Warehouse = require('../models/warehouse');
+          const inspectedJobs = await Job.find({
+            assignedDate:               date,
+            'inspections.supervisorId': req.params.employeeId,
+          }).populate('customerId', 'location');
+          for (const ij of inspectedJobs) {
+            const myInspection = ij.inspections.find(
+              i => i.supervisorId.toString() === req.params.employeeId
+            );
+            if (myInspection && ij.customerId?.location?.lat) {
+              waypointEvents.push({
+                lat: ij.customerId.location.lat,
+                lng: ij.customerId.location.lng,
+                ts:  myInspection.inspectedAt
+                  ? new Date(myInspection.inspectedAt).getTime()
+                  : 0,
+              });
+            }
+          }
+
+          // Warehouse visit
+          if (attRec?.warehouseVisit?.visitedAt) {
+            const wh = await Warehouse.findById(attRec.warehouseVisit.warehouseId);
+            if (wh?.location?.lat) {
+              waypointEvents.push({
+                lat: wh.location.lat,
+                lng: wh.location.lng,
+                ts:  new Date(attRec.warehouseVisit.visitedAt).getTime(),
+              });
+            }
+          }
+
+          // Sort all waypoints chronologically
+          waypointEvents.sort((a, b) => a.ts - b.ts);
+          if (waypointEvents.length > 0) {
+            routePoints = [home, ...waypointEvents.map(w => ({ lat: w.lat, lng: w.lng })), home];
+          }
+        } else {
+          // Regular employee — jobs only
+          const sorted = dayJobs
+            .filter(j =>
+              ((j.status === 'Completed' && isPayable(j)) ||
+                j.status === 'Cancelled') &&
+              j.customerId?.location?.lat)
+            .sort((a, b) => (a.sortOrder || 0) - (b.sortOrder || 0));
+          if (sorted.length > 0) {
+            routePoints = [home,
+              ...sorted.map(j => ({ lat: j.customerId.location.lat, lng: j.customerId.location.lng })),
+              home];
+          }
         }
       }
 
@@ -626,7 +712,7 @@ router.get('/my-salary/:employeeId', async (req, res) => {
       // Full incentive check — same criteria as admin salary
       const record = attMap[date];
       const inc    = await computeIncentiveFull(
-          record, req.params.employeeId, date, pricing);
+          record, req.params.employeeId, date, pricing, role);
       const incAmt = inc.amount;
 
       totalEarnings         += dayEarnings;
@@ -722,6 +808,10 @@ router.get('/incentive-history/:employeeId', async (req, res) => {
     const configDoc  = await Config.findOne({ key: 'pricing' });
     const pricing    = configDoc ? configDoc.value : { dailyIncentive: 100 };
 
+    // Fetch employee role for incentive logic
+    const empUser = await User.findById(req.params.employeeId).select('role');
+    const empRole = empUser?.role || 'employee';
+
     // Fetch all attendance records for this employee this month
     const records = await Attendance.find({
       employeeId: req.params.employeeId,
@@ -740,14 +830,15 @@ router.get('/incentive-history/:employeeId', async (req, res) => {
         .map(async date => {
           const record = recordMap[date];
           const inc    = await computeIncentiveFull(
-              record, req.params.employeeId, date, pricing);
+              record, req.params.employeeId, date, pricing, empRole);
           return {
             date,
-            earned:    inc.earned,
-            excused:   inc.excused || false,
-            amount:    inc.amount,
-            reasons:   inc.reasons,
-            isSaturday:inc.isSaturday,
+            earned:      inc.earned,
+            excused:     inc.excused || false,
+            amount:      inc.amount,
+            reasons:     inc.reasons,
+            isSaturday:  inc.isSaturday,
+            isSupervisor:inc.isSupervisor || false,
           };
         })
     );

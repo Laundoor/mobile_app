@@ -24,11 +24,14 @@ app.get('/app/version', (req, res) => {
   res.json({ minBuild: 2 });
 });
 
-app.use('/auth', require('./routes/auth'));
-app.use('/jobs',      require('./routes/jobs'));        // NEW
-app.use('/customers', require('./routes/customers'));   // NEW
-app.use('/upload', require('./routes/upload'));
-app.use('/admin', require('./routes/admin'));  // ← NEW
+require('./models/warehouse'); // register warehouse model
+
+app.use('/auth',       require('./routes/auth'));
+app.use('/jobs',       require('./routes/jobs'));        // NEW
+app.use('/customers',  require('./routes/customers'));   // NEW
+app.use('/upload',     require('./routes/upload'));
+app.use('/admin',      require('./routes/admin'));       // ← NEW
+app.use('/supervisor', require('./routes/supervisor')); // supervisor endpoints
 
 // Keep old /cars route alive temporarily during transition
 // Remove after confirming employee app is fully updated

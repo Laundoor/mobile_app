@@ -904,7 +904,7 @@ router.get('/salary/:employeeId', adminAuth, async (req, res) => {
     const incentiveDetails = [];
     const incResults = await Promise.all(
       attendanceRecords.map(record =>
-        computeIncentive(record, employeeId, record.date, pricing)
+        computeIncentive(record, employeeId, record.date, pricing, employee.role)
           .then(inc => ({ record, inc }))
       )
     );
@@ -1111,8 +1111,11 @@ router.post('/seed', async (req, res) => {
 
 // Helper: compute incentive eligibility for one attendance record + day's jobs
 // Returns { earned: bool, reasons: string[] }
-async function computeIncentive(record, employeeId, date, pricing) {
-  const incentiveAmt  = pricing.dailyIncentive ?? 100;
+async function computeIncentive(record, employeeId, date, pricing, role) {
+  const isSupervisor  = role === 'supervisor';
+  const incentiveAmt  = isSupervisor
+    ? (pricing.supervisorIncentive ?? pricing.dailyIncentive ?? 100)
+    : (pricing.dailyIncentive ?? 100);
   const isSaturday    = new Date(date + 'T12:00:00Z').getUTCDay() === 6;
   const reasons       = [];
 
@@ -1135,17 +1138,20 @@ async function computeIncentive(record, employeeId, date, pricing) {
     else if (record.dusterSoakApproval !== 'approved') reasons.push('dusterSoak');
   }
 
-  // 5. Before photo of first job on or before 06:15 IST
-  // If sortOrder:1 job was cancelled (no beforeUploadedAt), use cancelledAt
-  // or fall back to the earliest job with a beforeUploadedAt
+  // 5. Login time on or before 06:15 IST
+  // For supervisors also consider warehouseVisit.visitedAt as login trigger
   const firstJob = await Job.findOne({ employeeId, assignedDate: date })
     .sort({ sortOrder: 1 });
-  const startTs = firstJob?.beforeUploadedAt
+  const jobStartTs = firstJob?.beforeUploadedAt
     || (firstJob?.status === 'Cancelled' ? firstJob?.cancelledAt : null)
     || (await Job.findOne({
           employeeId, assignedDate: date,
           beforeUploadedAt: { $ne: null }
         }).sort({ beforeUploadedAt: 1 }))?.beforeUploadedAt;
+  const warehouseTs = record.warehouseVisit?.visitedAt || null;
+  const startTs = jobStartTs && warehouseTs
+    ? (new Date(jobStartTs) < new Date(warehouseTs) ? jobStartTs : warehouseTs)
+    : (jobStartTs || warehouseTs);
   if (startTs) {
     const ist  = new Date(new Date(startTs).getTime() + 5.5 * 60 * 60 * 1000);
     const hhmm = ist.getUTCHours() * 60 + ist.getUTCMinutes();
@@ -1154,13 +1160,24 @@ async function computeIncentive(record, employeeId, date, pricing) {
     reasons.push('late'); // no timestamp at all
   }
 
-  // 6. Minimum 5 completed cars for the day
-  const completedCount = await Job.countDocuments({
-    employeeId,
-    assignedDate: date,
-    status: 'Completed',
-  });
-  if (completedCount < 5) reasons.push('minCars');
+  if (isSupervisor) {
+    // 6. Supervisor: min inspections instead of min cars
+    const minInspections = pricing.supervisorMinInspections ?? 10;
+    const inspectedJobs  = await Job.find({
+      assignedDate:               date,
+      'inspections.supervisorId': employeeId,
+    });
+    const inspectionCount = inspectedJobs.filter(j =>
+      j.inspections.some(i => i.supervisorId.toString() === employeeId.toString())
+    ).length;
+    if (inspectionCount < minInspections) reasons.push('minInspections');
+  } else {
+    // 6. Minimum 5 completed cars for the day
+    const completedCount = await Job.countDocuments({
+      employeeId, assignedDate: date, status: 'Completed',
+    });
+    if (completedCount < 5) reasons.push('minCars');
+  }
 
   // 7. No complaints raised that day (unresolved OR resolved by reassignment)
   // resolvedByReassign = another employee fixed it — Dinesh still had bad work
@@ -1176,8 +1193,9 @@ async function computeIncentive(record, employeeId, date, pricing) {
   if (complainedJob) reasons.push('complaint');
 
   return {
-    earned:  reasons.length === 0,
-    amount:  reasons.length === 0 ? incentiveAmt : 0,
+    earned:      reasons.length === 0,
+    amount:      reasons.length === 0 ? incentiveAmt : 0,
+    isSupervisor,
     reasons,
     isSaturday,
   };
@@ -1241,7 +1259,9 @@ router.get('/attendance/:employeeId', adminAuth, async (req, res) => {
     const date     = req.query.date || todayIST();
     const empId    = req.params.employeeId;
 
-    const record = await Attendance.findOne({ employeeId: empId, date });
+    const record  = await Attendance.findOne({ employeeId: empId, date });
+    const empUser = await User.findById(empId).select('role');
+    const empRole = empUser?.role || 'employee';
 
     const configDoc = await Config.findOne({ key: 'pricing' });
     const pricing   = configDoc ? configDoc.value : DEFAULT_PRICING;
@@ -1259,7 +1279,7 @@ router.get('/attendance/:employeeId', adminAuth, async (req, res) => {
           incentiveExcused: false };
 
     // Incentive computation
-    const incentive = await computeIncentive(record, empId, date, pricing);
+    const incentive = await computeIncentive(record, empId, date, pricing, empRole);
     response.incentive = incentive;
 
     res.json(response);
@@ -1317,16 +1337,23 @@ router.get('/attendance/:employeeId/incentive-status', async (req, res) => {
     const empId   = req.params.employeeId;
     const record  = await Attendance.findOne({ employeeId: empId, date });
 
+    const empUser2 = await User.findById(empId).select('role');
+    const empRole2 = empUser2?.role || 'employee';
+
     const configDoc = await Config.findOne({ key: 'pricing' });
     const pricing   = configDoc ? configDoc.value : DEFAULT_PRICING;
 
-    const incentive = await computeIncentive(record, empId, date, pricing);
+    const incentive = await computeIncentive(record, empId, date, pricing, empRole2);
 
-    // Include login time (selfieUploadedAt) for employee display
+    // Include login time — earliest of selfieUploadedAt or warehouseVisit.visitedAt
     let loginTime = null;
-    if (record?.selfieUploadedAt || record?.createdAt) {
-      const raw  = record.selfieUploadedAt || record.createdAt;
-      const ist  = new Date(new Date(raw).getTime() + 5.5 * 60 * 60 * 1000);
+    const jobTs2       = record?.selfieUploadedAt || record?.createdAt || null;
+    const warehouseTs2 = record?.warehouseVisit?.visitedAt || null;
+    const rawLogin2    = jobTs2 && warehouseTs2
+      ? (new Date(jobTs2) < new Date(warehouseTs2) ? jobTs2 : warehouseTs2)
+      : (jobTs2 || warehouseTs2);
+    if (rawLogin2) {
+      const ist  = new Date(new Date(rawLogin2).getTime() + 5.5 * 60 * 60 * 1000);
       const h24  = ist.getUTCHours();
       const h12  = h24 === 0 ? 12 : h24 > 12 ? h24 - 12 : h24;
       const ampm = h24 < 12 ? 'AM' : 'PM';
@@ -2694,6 +2721,78 @@ router.put('/customers/:id/active', adminAuth, async (req, res) => {
     if (!customer) return res.status(404).send('Not found');
     res.json(customer);
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── PUT /admin/employees/:id/role — set role and supervisorId ─────────────────
+// Body: { role: 'employee'|'supervisor', supervisorId?: ObjectId|null }
+router.put('/employees/:id/role', adminAuth, async (req, res) => {
+  try {
+    const { role, supervisorId } = req.body;
+    if (!['employee', 'supervisor'].includes(role))
+      return res.status(400).send("role must be 'employee' or 'supervisor'");
+    const emp = await User.findByIdAndUpdate(
+      req.params.id,
+      { $set: { role, supervisorId: supervisorId || null } },
+      { new: true }
+    ).select('-password');
+    if (!emp) return res.status(404).send('Not found');
+    res.json(emp);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── GET /admin/supervisors — list all active supervisors ──────────────────────
+// Used by edit employee screen to populate the "Reports To" dropdown
+router.get('/supervisors', adminAuth, async (req, res) => {
+  try {
+    const supervisors = await User.find({ role: 'supervisor', isActive: true })
+      .select('_id name phone');
+    res.json(supervisors);
+  } catch (err) { res.status(500).send('Server error'); }
+});
+
+// ── GET /admin/warehouses — list all warehouses ───────────────────────────────
+router.get('/warehouses', adminAuth, async (req, res) => {
+  try {
+    const Warehouse = require('../models/warehouse');
+    const warehouses = await Warehouse.find().sort({ createdAt: -1 });
+    res.json(warehouses);
+  } catch (err) { res.status(500).send('Server error'); }
+});
+
+// ── POST /admin/warehouses — create warehouse ─────────────────────────────────
+// Body: { name, address?, location: {lat, lng}, mapsLink? }
+router.post('/warehouses', adminAuth, async (req, res) => {
+  try {
+    const Warehouse = require('../models/warehouse');
+    const { name, address, location, mapsLink } = req.body;
+    if (!name) return res.status(400).send("name required");
+    const wh = await Warehouse.create({ name, address, location, mapsLink });
+    res.json(wh);
+  } catch (err) { console.error(err); res.status(500).send('Server error'); }
+});
+
+// ── PUT /admin/warehouses/:id — update warehouse ──────────────────────────────
+router.put('/warehouses/:id', adminAuth, async (req, res) => {
+  try {
+    const Warehouse = require('../models/warehouse');
+    const { name, address, location, mapsLink, isActive } = req.body;
+    const wh = await Warehouse.findByIdAndUpdate(
+      req.params.id,
+      { $set: { name, address, location, mapsLink, isActive } },
+      { new: true }
+    );
+    if (!wh) return res.status(404).send('Not found');
+    res.json(wh);
+  } catch (err) { res.status(500).send('Server error'); }
+});
+
+// ── DELETE /admin/warehouses/:id — delete warehouse ───────────────────────────
+router.delete('/warehouses/:id', adminAuth, async (req, res) => {
+  try {
+    const Warehouse = require('../models/warehouse');
+    await Warehouse.findByIdAndDelete(req.params.id);
+    res.json({ success: true });
+  } catch (err) { res.status(500).send('Server error'); }
 });
 
 module.exports = router;

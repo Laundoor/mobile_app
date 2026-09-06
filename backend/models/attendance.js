@@ -23,6 +23,14 @@ const attendanceSchema = new mongoose.Schema({
   // Distance cache — set when day is complete (towel soak uploaded)
   // Avoids re-calling Google Distance Matrix API for past completed days
   distanceKm: { type: Number, default: null },
+
+  // Warehouse visit — supervisor only, one per day
+  // visitedAt used as login time if supervisor visits before starting any job
+  warehouseVisit: {
+    warehouseId: { type: mongoose.Schema.Types.ObjectId, ref: 'Warehouse', default: null },
+    photoUrl:    { type: String, default: null },
+    visitedAt:   { type: Date,   default: null },
+  },
 }, { timestamps: true });
 
 // One record per employee per day

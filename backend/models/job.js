@@ -46,12 +46,21 @@ const jobSchema = new mongoose.Schema({
     raised:             { type: Boolean, default: false },
     reason:             { type: String, default: null },
     note:               { type: String, default: null },
+    photos:             [String], // complaint photos — admin/supervisor can attach
     raisedAt:           { type: Date,   default: null },
     resolved:           { type: Boolean, default: false },
     resolvedAt:         { type: Date,   default: null },
     resolvedBy:         { type: String, default: null },
     resolvedByReassign: { type: Boolean, default: false }, // true = resolved via reassignment, not payable for original employee
   },
+
+  // Supervisor inspections — multiple supervisors can inspect same job
+  inspections: [{
+    supervisorId:   { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    supervisorName: { type: String },
+    photoUrl:       { type: String },
+    inspectedAt:    { type: Date },
+  }],
 
   // If this job was reassigned, points to the new job created for another employee
   reassignedJobId: {
