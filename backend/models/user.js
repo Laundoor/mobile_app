@@ -6,7 +6,8 @@ const userSchema = new mongoose.Schema({
   password: { type: String, required: true },
   role:     { type: String, enum: ['admin', 'employee', 'supervisor'], default: 'employee' },
   supervisorId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
-  isActive: { type: Boolean, default: false },
+  isActive:  { type: Boolean, default: false },  // daily login state — resets each day
+  isEnabled: { type: Boolean, default: true },   // admin toggle — permanently disables employee
   lastActiveDate: { type: String, default: null },
   phone:            { type: String, default: null },
   emergencyContact: { type: String, default: null },

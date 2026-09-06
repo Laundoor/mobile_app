@@ -226,9 +226,9 @@ router.get('/employees', adminAuth, async (req, res) => {
     const today  = todayIST();
     const filter = { role: { $in: ['employee', 'supervisor'] } };
     if (includeInactive === 'true') {
-      filter.isActive = false; // only inactive
+      filter.isEnabled = false; // only disabled employees
     } else {
-      filter.isActive = true;  // only active (default)
+      filter.isEnabled = { $ne: false }; // all enabled (default true + unset)
     }
     const employees = await User.find(filter).select('-password');
     const allJobs   = await Job.find({ assignedDate: today });
@@ -2695,13 +2695,13 @@ router.get('/pl', adminAuth, async (req, res) => {
   } catch (err) { console.error(err); res.status(500).send('Server error'); }
 });
 
-// ── PUT /admin/employees/:id/active — toggle employee active status ───────────
+// ── PUT /admin/employees/:id/active — toggle employee enabled status ──────────
 router.put('/employees/:id/active', adminAuth, async (req, res) => {
   try {
     const { isActive } = req.body;
     const emp = await User.findByIdAndUpdate(
       req.params.id,
-      { $set: { isActive: !!isActive } },
+      { $set: { isEnabled: !!isActive } }, // isActive from Flutter maps to isEnabled in DB
       { new: true }
     ).select('-password');
     if (!emp) return res.status(404).send('Not found');
