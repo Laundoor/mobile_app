@@ -566,8 +566,8 @@ router.get('/my-salary/:employeeId', async (req, res) => {
         (job.complaint?.resolved === true &&
          !job.complaint?.resolvedByReassign));
 
-    // ── Step 1: compute job earnings + car counts synchronously (no I/O) ──────
-    const dayData = sortedDates.map(([date, dayJobs]) => {
+    // ── Step 1: compute job earnings + car counts (async for supervisor distance) ─
+    const dayData = await Promise.all(sortedDates.map(async ([date, dayJobs]) => {
       const completedJobs = dayJobs.filter(j => j.status === 'Completed');
       let dayEarnings = 0;
       const counts = { Hatchback: 0, Sedan: 0, SUV: 0 };
@@ -667,7 +667,7 @@ router.get('/my-salary/:employeeId', async (req, res) => {
       }
 
       return { date, dayJobs, completedJobs, dayEarnings, counts, routePoints };
-    });
+    }));
 
     // Helper: is the day safe to cache distance
     // Past days are always final — cache regardless of towel soak
