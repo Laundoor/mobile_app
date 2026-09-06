@@ -19,6 +19,11 @@ mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log("MongoDB Connected"))
   .catch(err => console.error("MongoDB Error:", err));
 
+// Bump minBuild whenever you release a mandatory update
+app.get('/app/version', (req, res) => {
+  res.json({ minBuild: 2 });
+});
+
 app.use('/auth', require('./routes/auth'));
 app.use('/jobs',      require('./routes/jobs'));        // NEW
 app.use('/customers', require('./routes/customers'));   // NEW

@@ -130,8 +130,9 @@ async function computeDayDistanceKm(points) {
   return parseFloat(total.toFixed(2));
 }
 
-// ── GET /jobs/employee/:employeeId — jobs for an employee (default: today) ────
-router.get('/employee/:employeeId', async (req, res) => {
+// ── GET /jobs/v2/employee/:employeeId — jobs for an employee (default: today) ─
+// v2 path forces old APKs (which call /jobs/employee/:id) to get 404
+router.get('/v2/employee/:employeeId', async (req, res) => {
   try {
     const date = req.query.date || todayIST();
     const jobs  = await Job.find({
